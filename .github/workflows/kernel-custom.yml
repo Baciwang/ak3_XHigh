@@ -202,8 +202,8 @@ on:
         type: choice
         options:
           - SukiSU
-          - ReSukiSU
-        default: ReSukiSU
+          - BakaSU
+        default: BakaSU
 
       # ==================== 可选配置 ====================
       version:

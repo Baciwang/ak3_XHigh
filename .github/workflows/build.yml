@@ -507,7 +507,7 @@ jobs:
           variant_input="${{ inputs.ksu_variant }}"
 
           case "$variant_input" in
-            "ReSukiSU")
+            "BakaSU"|"ReSukiSU")
               BRANCH="-s main"
               ;;
             "SukiSU")
@@ -548,10 +548,10 @@ jobs:
               curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $BRANCH
               bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU sukisu
               ;;
-            "ReSukiSU")
-              echo "添加 ReSukiSU..."
-              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash $BRANCH
-              bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU resukisu
+            "BakaSU"|"ReSukiSU")
+              echo "添加 BakaSU..."
+              curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash $BRANCH
+              bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU bakasu
               ;;
             *)
               echo "未知变体: ${{ inputs.ksu_variant }}" >&2
@@ -1292,7 +1292,7 @@ jobs:
           CONFIG_TMPFS_POSIX_ACL=y
           EOF
 
-          if [ "${{ inputs.ksu_variant }}" == "SukiSU" ] || [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+          if [ "${{ inputs.ksu_variant }}" == "SukiSU" ] || [ "${{ inputs.ksu_variant }}" == "BakaSU" ] || [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
             if [[ "${{ inputs.use_kpm }}" == enabled* ]] || [[ "${{ inputs.use_kpm }}" == patched* ]]; then
               if grep -RqsE '^[[:space:]]*config[[:space:]]+KPM([[:space:]]|$)' common KernelSU 2>/dev/null; then
                 echo "CONFIG_KPM=y" >> "$DEFCONFIG"
@@ -1314,12 +1314,12 @@ jobs:
           if [[ ! "$CURRENT_SUB" =~ ^[0-9]+$ ]]; then
             CURRENT_SUB=99999
           fi
-          if [[ "${{ inputs.ksu_variant }}" == "ReSukiSU" && "${{ inputs.android_version }}" == "android13" && "${{ inputs.kernel_version }}" == "5.15" && "$CURRENT_SUB" -ge 74 && "$CURRENT_SUB" -le 137 ]]; then
+          if [[ "${{ inputs.ksu_variant }}" == "BakaSU" && "${{ inputs.android_version }}" == "android13" && "${{ inputs.kernel_version }}" == "5.15" && "$CURRENT_SUB" -ge 74 && "$CURRENT_SUB" -le 137 ]]; then
             {
               echo "CONFIG_KALLSYMS=y"
               echo "CONFIG_KALLSYMS_ALL=y"
             } >> "$DEFCONFIG"
-            # 修复 5.15.74~5.15.137: kallsyms_on_each_symbol 仅在 LIVEPATCH 下编译，导致 ReSukiSU 链接失败
+            # 修复 5.15.74~5.15.137: kallsyms_on_each_symbol 仅在 LIVEPATCH 下编译，导致 BakaSU 链接失败
             KALLSYMS_C="./common/kernel/kallsyms.c"
             if [ -f "$KALLSYMS_C" ] \
               && grep -qF 'int kallsyms_on_each_symbol' "$KALLSYMS_C" \
@@ -1610,7 +1610,7 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/a17_crc_restore.py" "$TARGET_PATH/Image" "${{ inputs.kernel_version }}"
 
       - name: 应用 KPM 补丁（构建期修补 Image）
-        if: startsWith(inputs.use_kpm, 'patched') && (inputs.ksu_variant == 'SukiSU' || inputs.ksu_variant == 'ReSukiSU')
+        if: startsWith(inputs.use_kpm, 'patched') && (inputs.ksu_variant == 'SukiSU' || inputs.ksu_variant == 'BakaSU' || inputs.ksu_variant == 'ReSukiSU')
         run: |
           set -e
           if [ "$BUILTIN_SOURCE" = "true" ]; then
