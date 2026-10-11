@@ -143,11 +143,15 @@ def array_of(b, entry, limit=64):
 
 
 def resolve(b, names):
-    """Locate the ONE ksymtab array holding all of `names`."""
+    """Locate the ONE ksymtab array holding all of `names`; None if absent.
+
+    Absence is not an error: a build can legitimately have no exported LZ4
+    symbols (see diagnose()), e.g. when zram (and therefore lib/lz4) stayed a
+    module, in which case the entries live in the .ko files, not in Image."""
     names = set(names)
     cands = entries_for(b, names)
     if not cands:
-        raise SystemExit("::error::no LZ4 ksymtab entries found in Image")
+        return None
     groups = {}
     for entry, _name_off, name in cands:
         base, count = array_of(b, entry)
@@ -162,17 +166,85 @@ def resolve(b, names):
                 found[name] = (min(ents), (min(ents) - base) // 12)
         if len(found) == len(names):
             return base, count, found
-    raise SystemExit(
-        "::error::could not locate a ksymtab array with all %d LZ4 symbols (%s)"
-        % (len(names), ", ".join(sorted(n.decode() for n in names)))
-    )
+    return None
+
+
+def _valid_entry(b, e):
+    if e < 0 or e + 12 > len(b):
+        return False
+    f = e + 4
+    t = f + s32(b, f)
+    if not (0 < t < len(b)):
+        return False
+    k = t
+    while k < len(b) and (chr(b[k]).isalnum() or b[k] == 0x5F):
+        k += 1
+    return not (k == t or k - t > 200 or k >= len(b) or b[k] != 0)
+
+
+def diagnose(b, names):
+    """Explain a failed lookup: what the Image does export."""
+    out = []
+    best = None
+    i = 0
+    n = len(b) // 4
+    while i < n:
+        e = i * 4
+        if _valid_entry(b, e):
+            base = e
+            while _valid_entry(b, base - 12):
+                base -= 12
+            cur = e
+            cnt = 1
+            while _valid_entry(b, cur + 12):
+                cur += 12
+                cnt += 1
+            if best is None or cnt > best[1]:
+                best = (base, cnt)
+            i = (cur // 4) + 1
+        else:
+            i += 1
+
+    if best is None:
+        out.append("Image 中找不到任何 ksymtab 结构（可能传进来的不是内核 Image）")
+        return out
+
+    base, cnt = best
+    out.append("Image 中最大的 ksymtab 结构在 %#x，共 %d 个符号" % (base, cnt))
+    allnames = []
+    for k in range(cnt):
+        e = base + 12 * k
+        t = e + 4 + s32(b, e + 4)
+        end = b.find(b"\0", t, t + 200)
+        if end > t:
+            allnames.append(b[t:end].decode("latin-1"))
+    related = sorted({x for x in allnames
+                      if "lz4" in x.lower() or "zram" in x.lower() or "zsmalloc" in x.lower()})
+    if related:
+        out.append("含 LZ4/ZRAM 相关符号: %s" % ", ".join(related[:24]))
+    else:
+        out.append("完全不导出任何 LZ4/ZRAM 符号 -> LZ4 很可能被编成了模块："
+                   "6.1 的 GKI defconfig 是 CONFIG_ZRAM=m，lib/lz4 的 CONFIG_LZ4_COMPRESS/"
+                   "CONFIG_LZ4_DECOMPRESS 由 drivers/block/zram/Kconfig 的 select 带出，"
+                   "zram 保持 =m 时 LZ4 也随之为模块，导出符号只在 lz4_*.ko 里、不在 Image 中"
+                   "（出现这种情况通常意味着 ZRAM 补丁栈被跳过或「配置 ZRAM 选项」未生效，"
+                   "厂商模块届时也会因 Unknown symbol 拒载）")
+        out.append("ksymtab 前 10 个符号示例: %s" % ", ".join(allnames[:10]))
+    return out
 
 
 def restore(path, table):
     b = open(path, "rb").read()
     print("Image: %d bytes" % len(b))
     names = sorted(table)
-    base, count, found = resolve(b, names)
+    hit = resolve(b, names)
+    if hit is None:
+        print("::warning title=CRC 还原跳过::Image 中找不到 %s 的 ksymtab 条目，未修改 Image"
+              % ", ".join(n.decode() for n in names))
+        for line in diagnose(b, names):
+            print("    " + line)
+        return
+    base, count, found = hit
     crc_base = base + 12 * count
     print("  ksymtab array 0x%x  count %d  ->  kcrctab_base 0x%x" % (base, count, crc_base))
 
@@ -198,7 +270,10 @@ def restore(path, table):
 
     # verify with a fresh parse
     nb = open(path, "rb").read()
-    _b2, _c2, n_found = resolve(nb, names)
+    hit2 = resolve(nb, names)
+    if hit2 is None:
+        raise SystemExit("::error::CRC readback failed: LZ4 entries not found after write")
+    _b2, _c2, n_found = hit2
     crc2 = _b2 + 12 * _c2
     bad = [n for n in names if u32(nb, crc2 + 4 * n_found[n][1]) != table[n]]
     if bad:

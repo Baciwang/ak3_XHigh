@@ -1585,7 +1585,9 @@ jobs:
       # 6.12（android16）。实测同 KMI 下 LZ4 函数 ABI 兼容，仅 CRC 值不同。
       # 位置约束：必须在 编译内核 之后（Image 已生成）、KPM 补丁 之前。
       - name: 还原 LZ4 符号官方 CRC（修复 ZRAM 补丁栈导致的厂商模块 CRC 拒载）
-        if: inputs.use_zram == true
+        # 只在 ZRAM 补丁栈真正生效时执行：栈被跳过（缺资源/不兼容）时 zram 仍是
+        # 模块，lib/lz4 随之为模块，Image 里没有 LZ4 导出，无从还原（脚本会给出诊断）。
+        if: inputs.use_zram == true && env.ZRAM_SKIPPED != 'true'
         run: |
           case "${{ inputs.kernel_version }}" in
             6.1|6.6|6.12) ;;
