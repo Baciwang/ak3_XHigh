@@ -407,3 +407,37 @@ selinux_hide_compat() {
   fi
 }
 selinux_hide_compat
+
+# ---- 上游 BakaSU 的硬失败放行 ----
+# kernel/tools/susfs_compat.mk 末尾目前无条件写着
+#   $(info -- $(REPO_NAME): susfs has NOT update with latest KernelSU source)
+#   $(info -- $(REPO_NAME): Please wait simonpunk update)
+#   $(error Please wait susfs update.)
+# 于是所有构建都在等 simonpunk 更新 SUSFS 之前无法通过。按上游给出的修复思路自行放行：
+# 该文件上面的 KSU_COMPAT_* 宏仍按源码自动探测（不改动其判断），版本相关的兼容规则由
+# 上面的 selinux_hide_compat 负责（<6.6 缺 should_check_current 阻断、>=6.6 需二改
+# 的 *_with_policy、<6.6 补回旧版 fake_state），所以这里仅摘掉那句无条件硬失败。
+susfs_compat_unblock() {
+  local mk=""
+  local cand
+  for cand in "$KERNEL_ROOT/KernelSU/kernel/tools/susfs_compat.mk" \
+              "$KERNEL_ROOT/common/drivers/kernelsu/kernel/tools/susfs_compat.mk"; do
+    if [ -f "$cand" ]; then mk="$cand"; break; fi
+  done
+  if [ -z "$mk" ]; then
+    echo "SUSFS compat：未找到 susfs_compat.mk（该分支可能不含此检查），跳过"
+    return 0
+  fi
+  if grep -q '^\$(error' "$mk"; then
+    echo "SUSFS compat：移除上游硬编码的 \$(error Please wait susfs update.)（按上游修复思路自行放行）"
+    sed -i '/^\$(error/d' "$mk"
+    if grep -q '^\$(error' "$mk"; then
+      echo "::error::移除 $mk 里的硬失败失败" >&2
+      exit 1
+    fi
+    grep -n 'KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE\|KSU_COMPAT_HAS_SUSFS_INSTALL_SU_FD_DIRECT_CALL' "$mk" | head -4
+  else
+    echo "SUSFS compat：susfs_compat.mk 已无硬失败，跳过"
+  fi
+}
+susfs_compat_unblock
