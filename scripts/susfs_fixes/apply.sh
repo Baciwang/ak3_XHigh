@@ -341,3 +341,69 @@ if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
     echo "已修复 setuid_hook.c 重复定义问题"
   fi
 fi
+###############################################################################
+# SELinux hide 跨版本兼容（按上游给出的修复思路实现）
+#
+# 上游 SUSFS/KSU 的 selinux_hide 换成了新形态（backup_sepolicy + 8 参 _with_policy），
+# 与旧内核源码组合时会编译报错、或运行时 kernel panic。按内核版本分流：
+#   1) 内核 < 6.6：security/selinux/hooks.c 里没有 should_check_current，但 KSU 侧
+#      能扫到 ksu_selinux_hide_running —— 即 KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE：
+#      该组合不受支持，阻断编译并要求更新内核源码 / SUSFS 补丁。
+#   2) 内核 >= 6.6：必须使用二改的 security_context_to_sid_with_policy /
+#      security_sid_to_context_with_policy / security_compute_av_user_with_policy，
+#      否则运行时 kernel panic；缺失即报错。
+#   3) 内核 < 6.6：必须把旧版 fake_state 重新提供（同步上游时被一并删掉），
+#      否则编译报错；检测到“有引用、无定义”就在 include 之后补回定义。
+###############################################################################
+selinux_hide_compat() {
+  local ksu_dirs="$KERNEL_ROOT/common/drivers/kernelsu $KERNEL_ROOT/KernelSU"
+  local hide_file
+  hide_file=$(grep -Rls 'ksu_selinux_hide_running' $ksu_dirs 2>/dev/null | head -n 1 || true)
+  if [ -z "$hide_file" ]; then
+    echo "SELinux hide 兼容：KSU 侧未启用 selinux_hide，跳过"
+    return 0
+  fi
+  echo "SELinux hide 兼容：KSU 侧实现 = ${hide_file#"$KERNEL_ROOT"/}"
+
+  local ge66=false
+  if [ "$(printf '%s\n6.6\n' "$KERNEL_VERSION" | sort -V | head -n 1)" = "6.6" ]; then
+    ge66=true
+  fi
+
+  if [ "$ge66" = true ]; then
+    local missing="" fn
+    for fn in security_context_to_sid_with_policy security_sid_to_context_with_policy security_compute_av_user_with_policy; do
+      grep -Rqs "$fn" $ksu_dirs || missing="$missing $fn"
+    done
+    if [ -n "$missing" ]; then
+      echo "::error title=SUSFS SELinux hide 不兼容::$KERNEL_VERSION（>=6.6）需要二改的 *_with_policy 函数（否则运行时 kernel panic），当前缺失:$missing。请更新 SUSFS/KSU 源码后重试" >&2
+      exit 1
+    fi
+    echo "SELinux hide 兼容：>=6.6，二改 *_with_policy 已就位"
+    return 0
+  fi
+
+  # ---------------- 内核 < 6.6 ----------------
+  local hooks="$KERNEL_ROOT/common/security/selinux/hooks.c"
+  if [ -f "$hooks" ] && ! grep -qs 'should_check_current' "$hooks"; then
+    echo "::error title=KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE::$KERNEL_VERSION（<6.6）的 security/selinux/hooks.c 缺少 should_check_current，而 KSU 侧已启用 selinux_hide（ksu_selinux_hide_running）。该组合不受支持，已阻断编译；请更新内核源码或 SUSFS 补丁后重试" >&2
+    exit 1
+  fi
+
+  if grep -q 'fake_state' "$hide_file" \
+    && ! grep -qE '^[[:space:]]*(static[[:space:]]+)?struct selinux_state[[:space:]]+fake_state' "$hide_file"; then
+    echo "SELinux hide 兼容：<6.6 缺少旧版 fake_state 定义，按上游思路就地补回"
+    awk 'NR==FNR { if ($0 ~ /^#include/) last=NR; next }
+         { print; if (FNR==last && !done) { print "static struct selinux_state fake_state;"; done=1 } }' \
+      "$hide_file" "$hide_file" > "$hide_file.tmp"
+    mv "$hide_file.tmp" "$hide_file"
+    if ! grep -qE '^static struct selinux_state fake_state;' "$hide_file"; then
+      echo "::error::补回 fake_state 定义失败（$hide_file）" >&2
+      exit 1
+    fi
+    echo "SELinux hide 兼容：已补回 static struct selinux_state fake_state;"
+  else
+    echo "SELinux hide 兼容：<6.6，fake_state 无需补回"
+  fi
+}
+selinux_hide_compat
