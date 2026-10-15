@@ -441,3 +441,31 @@ susfs_compat_unblock() {
   fi
 }
 susfs_compat_unblock
+
+# ---- SukiSU 新宏在旧内核上的回退 ----
+# SukiSU 最新源码的 manager/pkg_observer.c 使用 TRACK_THRONE_FORCE_SYNCHRONOUS，该宏只在
+# 较新内核里存在；6.1 等旧内核只有 PROBE_FORCE_SYNCHRONOUS，编译即报
+#   error: use of undeclared identifier 'TRACK_THRONE_FORCE_SYNCHRONOUS'
+# 内核头文件没有新宏时，把源码里的新名字回退成旧名字。
+ksu_track_throne_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/pkg_observer.c" \
+              "$KERNEL_ROOT/KernelSU/manager/pkg_observer.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ] || ! grep -q 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$f"; then
+    echo "KSU 新宏兼容：pkg_observer.c 未使用 TRACK_THRONE_FORCE_SYNCHRONOUS，跳过"
+    return 0
+  fi
+  if grep -Rqs 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$KERNEL_ROOT/common/include" 2>/dev/null; then
+    echo "KSU 新宏兼容：内核已提供该宏，保持原样"
+    return 0
+  fi
+  sed -i 's/TRACK_THRONE_FORCE_SYNCHRONOUS/PROBE_FORCE_SYNCHRONOUS/g' "$f"
+  if grep -q 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$f"; then
+    echo "::error::回退 TRACK_THRONE_FORCE_SYNCHRONOUS 失败（$f）" >&2
+    exit 1
+  fi
+  echo "KSU 新宏兼容：已把 pkg_observer.c 的 TRACK_THRONE_FORCE_SYNCHRONOUS 回退为 PROBE_FORCE_SYNCHRONOUS"
+}
+ksu_track_throne_compat
