@@ -442,31 +442,54 @@ susfs_compat_unblock() {
 }
 susfs_compat_unblock
 
-# ---- SukiSU 新宏在旧内核上的回退 ----
-# SukiSU 最新源码的 manager/pkg_observer.c 使用 TRACK_THRONE_FORCE_SYNCHRONOUS，该宏只在
-# 较新内核里存在；6.1 等旧内核只有 PROBE_FORCE_SYNCHRONOUS，编译即报
-#   error: use of undeclared identifier 'TRACK_THRONE_FORCE_SYNCHRONOUS'
-# 内核头文件没有新宏时，把源码里的新名字回退成旧名字。
+# ---- builtin 的 track_throne 实参错配（新调用方 + 旧 bool 形参）----
+# builtin 的 manager/pkg_observer.c（PR #3871 引入，c8959206）两处以
+#   track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)
+# 调用，但 TRACK_THRONE_FORCE_SYNCHRONOUS 是 BakaSU 那套
+#   void track_throne(unsigned int flags)   （throne_tracker.h 里 #define (1 << 2)）
+# 位标志 API 的宏，builtin 从未定义过它；builtin 的 throne_tracker.c/.h 仍是旧 API
+#   void track_throne(bool prune_only)
+# 且函数一开头就是 `if (prune_only) goto prune;`（只剪 allowlist，不做管理器加冕扫描）。
+# 注意：直接用内核的 PROBE_FORCE_SYNCHRONOUS 当替身虽然能编过，但它是
+# include/linux/device.h 的驱动 probe 枚举（PROBE_DEFAULT_STRATEGY=0、
+# PROBE_PREFER_ASYNCHRONOUS=1、PROBE_FORCE_SYNCHRONOUS=2，非 0）——等于永远传
+# prune_only=true，管理器永远不会被加冕，is_manager() 恒 false，管理器拿不到 root
+# （表现为「管理器没权限」、修补 boot/LKM 也失败）。main 分支同一调用点写的就是
+# track_throne(false)（false = 全量扫描），builtin 的 fsnotify 路径同样需要全量扫描，
+# 依此替换；上游若把 flags 版 API 带进 builtin（树内 #define 了该宏）则自动跳过。
 ksu_track_throne_compat() {
-  local f="" cand
-  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/pkg_observer.c" \
-              "$KERNEL_ROOT/KernelSU/manager/pkg_observer.c"; do
-    if [ -f "$cand" ]; then f="$cand"; break; fi
+  local roots=("$KERNEL_ROOT/KernelSU" "$KERNEL_ROOT/common/drivers/kernelsu")
+  local pat='track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)'
+  local files n
+  files=$(grep -RFl "$pat" "${roots[@]}" 2>/dev/null || true)
+  if [ -z "$files" ]; then
+    echo "KSU track_throne 兼容：树内无 \"$pat\" 调用，跳过"
+    return 0
+  fi
+
+  if grep -RqsE '^[[:space:]]*#[[:space:]]*define[[:space:]]+TRACK_THRONE_FORCE_SYNCHRONOUS' \
+       "${roots[@]}" 2>/dev/null; then
+    echo "KSU track_throne 兼容：树内已定义 TRACK_THRONE_FORCE_SYNCHRONOUS（flags 版 API 已就位），保持原样"
+    return 0
+  fi
+
+  echo "KSU track_throne 兼容：把 \"$pat\" 换成 track_throne(false)（旧 API 下 false=全量扫描）"
+  local f
+  for f in $files; do
+    sed -i 's/track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)/track_throne(false)/g' "$f"
   done
-  if [ -z "$f" ] || ! grep -q 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$f"; then
-    echo "KSU 新宏兼容：pkg_observer.c 未使用 TRACK_THRONE_FORCE_SYNCHRONOUS，跳过"
-    return 0
-  fi
-  if grep -Rqs 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$KERNEL_ROOT/common/include" 2>/dev/null; then
-    echo "KSU 新宏兼容：内核已提供该宏，保持原样"
-    return 0
-  fi
-  sed -i 's/TRACK_THRONE_FORCE_SYNCHRONOUS/PROBE_FORCE_SYNCHRONOUS/g' "$f"
-  if grep -q 'TRACK_THRONE_FORCE_SYNCHRONOUS' "$f"; then
-    echo "::error::回退 TRACK_THRONE_FORCE_SYNCHRONOUS 失败（$f）" >&2
+
+  # 写后校验：调用残留必须清零，且替换结果确实存在
+  n=$(grep -RFl "$pat" "${roots[@]}" 2>/dev/null | wc -l || true)
+  if [ "$n" -ne 0 ]; then
+    echo "::error::替换 TRACK_THRONE_FORCE_SYNCHRONOUS 失败（仍有 $n 个文件含该调用）" >&2
     exit 1
   fi
-  echo "KSU 新宏兼容：已把 pkg_observer.c 的 TRACK_THRONE_FORCE_SYNCHRONOUS 回退为 PROBE_FORCE_SYNCHRONOUS"
+  if ! grep -Rqs 'track_throne(false)' "${roots[@]}" 2>/dev/null; then
+    echo "::error::替换后未找到 track_throne(false)，请人工核对 manager/pkg_observer.c" >&2
+    exit 1
+  fi
+  echo "KSU track_throne 兼容：已替换为 track_throne(false)（恢复管理器加冕扫描）"
 }
 ksu_track_throne_compat
 
