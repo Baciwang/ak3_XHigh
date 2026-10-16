@@ -536,3 +536,59 @@ ksu_manager_ioctl_compat() {
   echo "KSU manager ioctl 兼容：已把 106 号 ioctl 补正为 KSU_IOCTL_MANAGER = _IOWR('K', 106, struct ksu_manager_cmd)"
 }
 ksu_manager_ioctl_compat
+
+# ---- SukiSU builtin 的 throne_tracker 合并残留（与上一处同一批移植）----
+# 上游 builtin 移植 dynamic multi-manager（a233901 / PR #987）时还漏改了一处：
+# crown_manager() 里 pkg 是 if (sig_fallback) 块内的局部变量，函数末尾那个
+# 「跳过内置管理器、只给动态管理器加冕」的循环却在块外引用它：
+#   common/drivers/kernelsu/manager/throne_tracker.c:97: error:
+#     use of undeclared identifier 'pkg'
+# main 分支该行用的是 KSU_PACKAGE_NAME（语义＝跳过内置管理器自己那条记录，
+# 见 main 对应循环里的 continue），按 main 换回去即可；块内那处合法用法不动。
+# 该文件里这串调用只会出现两次（一次块内、一次块外），据此判定并按内容跳过。
+ksu_throne_tracker_pkg_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/throne_tracker.c" \
+              "$KERNEL_ROOT/KernelSU/kernel/manager/throne_tracker.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ]; then
+    echo "KSU throne_tracker 兼容：未找到 manager/throne_tracker.c（该分支布局可能已变化），跳过"
+    return 0
+  fi
+
+  local pat='strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)'
+  local n
+  n=$(grep -oF "$pat" "$f" | wc -l || true)
+  if [ "$n" -eq 1 ]; then
+    echo "KSU throne_tracker 兼容：pkg 只在 sig_fallback 块内使用，无需处理"
+    return 0
+  fi
+  if [ "$n" -eq 0 ]; then
+    echo "KSU throne_tracker 兼容：未找到 \"$pat\"（上游可能已重构该函数），跳过"
+    return 0
+  fi
+  if [ "$n" -ne 2 ]; then
+    echo "::error title=KSU throne_tracker 兼容失败::$f 中 \"$pat\" 出现 $n 次（期望 0/1/2 次），无法判定哪一处是块外残留，请对照 main 分支人工核对" >&2
+    exit 1
+  fi
+
+  echo "KSU throne_tracker 兼容：块外残留引用了局部变量 pkg，按 main 换回 KSU_PACKAGE_NAME"
+  # 第一处在 if (sig_fallback) 块内（合法），只改最后一处
+  perl -0777 -i -pe '
+    my $pat = q{strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)};
+    my $n = () = /\Q$pat\E/g;
+    my $i = 0;
+    s{\Q$pat\E}{ ++$i == $n ? "strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)" : $& }ge;
+  ' "$f"
+
+  # 写后校验：块内那处保留、块外那处已换掉
+  n=$(grep -oF "$pat" "$f" | wc -l || true)
+  if [ "$n" -ne 1 ] \
+    || ! grep -qF 'strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)' "$f"; then
+    echo "::error::throne_tracker.c 补正失败（剩余 \"$pat\" $n 处），请对照 main 分支人工核对" >&2
+    exit 1
+  fi
+  echo "KSU throne_tracker 兼容：已把块外的 pkg 换回 KSU_PACKAGE_NAME"
+}
+ksu_throne_tracker_pkg_compat
