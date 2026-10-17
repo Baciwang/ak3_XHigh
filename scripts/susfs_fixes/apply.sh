@@ -505,7 +505,11 @@ ksu_track_throne_compat
 # 而 kernel/supercall/dispatch.c 的 do_manager 注册用的是 KSU_IOCTL_MANAGER，
 # 于是这个被使用的名字在头文件里从未被声明。注意 manager.h / dynamic_manager.c
 # 在 builtin 与 main 里逐字节相同（且已由 ksu.c 引入），不需要从 main 搬文件，
-# 只要把这一行补正成 KSU_IOCTL_MANAGER + struct ksu_manager_cmd 即可。
+# 只要让 KSU_IOCTL_MANAGER 恰好被声明一次。上游对此先后出现过两种形态，都要认：
+#   形态 A（a233901 起、c95d6e2 止）：那行还在，但标识符写成 KSU_IOCTL_KPM 且缺
+#     struct —— 就地改名并补 struct；
+#   形态 B（0af2cf9 起）：上游只把那行删掉（消掉了重名错误），dispatch.c 仍在引用
+#     KSU_IOCTL_MANAGER —— 按 main 在 KSU_IOCTL_KPM(200) 之前补回规范声明。
 # 上游修正后本步骤按内容检测自动跳过。
 ksu_manager_ioctl_compat() {
   local candidates=(
@@ -529,7 +533,7 @@ ksu_manager_ioctl_compat() {
     return 0
   fi
 
-  local used_in
+  local used_in SHAPE=""
   used_in=$(grep -Rls 'KSU_IOCTL_MANAGER' \
               "$KERNEL_ROOT/KernelSU" "$KERNEL_ROOT/common/drivers/kernelsu" 2>/dev/null \
             | head -n 1 || true)
@@ -537,15 +541,28 @@ ksu_manager_ioctl_compat() {
     echo "KSU manager ioctl 兼容：树内未引用 KSU_IOCTL_MANAGER，无需处理"
     return 0
   fi
-  echo "KSU manager ioctl 兼容：${used_in#"$KERNEL_ROOT"/} 引用了未声明的 KSU_IOCTL_MANAGER，补正 $uapi 的 106 号 ioctl 行"
+  echo "KSU manager ioctl 兼容：${used_in#"$KERNEL_ROOT"/} 引用了未声明的 KSU_IOCTL_MANAGER，补正 $uapi"
 
-  # 只动“同一行里既有 KSU_IOCTL_* 标识符、又出现 ksu_manager_cmd”的那一行，
-  # 即 106 号 ioctl 的声明行；不锚定行尾，兼容 CRLF 检出。
-  perl -i -pe '
-    next unless /\bKSU_IOCTL_[A-Z0-9_]+\b/ && /\bksu_manager_cmd\b/;
-    s/(?<!struct )\bksu_manager_cmd\b/struct ksu_manager_cmd/g;
-    s/\bKSU_IOCTL_[A-Z0-9_]+\b/KSU_IOCTL_MANAGER/;
-  ' "$uapi"
+  if grep -qE '\bKSU_IOCTL_[A-Z0-9_]+\b.*\bksu_manager_cmd\b' "$uapi"; then
+    SHAPE=A
+    # 形态 A：只动“同一行里既有 KSU_IOCTL_* 标识符、又出现 ksu_manager_cmd”的那一行，
+    # 即 106 号 ioctl 的声明行；不锚定行尾，兼容 CRLF 检出。
+    perl -i -pe '
+      next unless /\bKSU_IOCTL_[A-Z0-9_]+\b/ && /\bksu_manager_cmd\b/;
+      s/(?<!struct )\bksu_manager_cmd\b/struct ksu_manager_cmd/g;
+      s/\bKSU_IOCTL_[A-Z0-9_]+\b/KSU_IOCTL_MANAGER/;
+    ' "$uapi"
+  else
+    SHAPE=B
+    # 形态 B：那行已被上游删掉，在 KSU_IOCTL_KPM 的 200 号声明之前插入规范声明，
+    # 顺序与 main 的 uapi/supercall.h 一致（MANAGER 在 KPM 之前）。行尾跟随原文件。
+    perl -0777 -i -pe '
+      my $q = chr(39);
+      my $nl = /\r\n/ ? "\r\n" : "\n";
+      my $decl = "DECLARE(__u32, KSU_IOCTL_MANAGER, _IOWR(${q}K${q}, 106, struct ksu_manager_cmd));";
+      s{^(.*DECLARE\(__u32, KSU_IOCTL_KPM,.*\b200\b.*)$}{$decl . $nl . $1}me;
+    ' "$uapi"
+  fi
 
   # 写后校验：MANAGER/KPM 各自恰好一个定义，且 106 号行带上 struct 关键字
   local mgr_count kpm_count
@@ -553,7 +570,7 @@ ksu_manager_ioctl_compat() {
   kpm_count=$(grep -cE '\bKSU_IOCTL_KPM\b[[:space:]]*[=,]' "$uapi" || true)
   if [ "$mgr_count" != "1" ] || [ "$kpm_count" != "1" ] \
     || ! grep -qE "106[^)]*struct[[:space:]]+ksu_manager_cmd" "$uapi"; then
-    echo "::error title=KSU manager ioctl 兼容失败::未能补正 $uapi 的 106 号 ioctl 声明（KSU_IOCTL_MANAGER 定义数=$mgr_count，KSU_IOCTL_KPM 定义数=$kpm_count）。上游布局可能已变化，请对比 main 分支的 uapi/supercall.h 人工核对" >&2
+    echo "::error title=KSU manager ioctl 兼容失败::未能补正 $uapi 的 106 号 ioctl 声明（形态 $SHAPE；KSU_IOCTL_MANAGER 定义数=$mgr_count，KSU_IOCTL_KPM 定义数=$kpm_count）。上游布局可能已变化，请对比 main 分支的 uapi/supercall.h 人工核对" >&2
     exit 1
   fi
   echo "KSU manager ioctl 兼容：已把 106 号 ioctl 补正为 KSU_IOCTL_MANAGER = _IOWR('K', 106, struct ksu_manager_cmd)"
