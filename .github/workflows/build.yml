@@ -99,7 +99,12 @@ on:
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.display_sub || inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # 钉住镜像：linux 内核构建里的 perl 由 AOSP prebuilts/build-tools 提供
+    # （lib/build_OID_registry 用 $(PERL)），其 XS 模块只匹配固定版本的系统 perl；
+    # ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26，系统 perl 版本一变就报
+    # "Cwd.c: loadable library and perl binaries are mismatched"（lib/oid_registry_data.c 生成失败）。
+    # 等 AOSP build-tools 跟进新 perl 后再考虑放开。
     # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
     timeout-minutes: 90
 
@@ -254,7 +259,7 @@ jobs:
           path: |
             kernel-build-tools
             mkbootimg
-          key: toolchain-${{ runner.os }}-v1
+          key: toolchain-${{ runner.os }}-v2
 
       - name: 下载工具链
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
