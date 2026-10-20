@@ -505,11 +505,13 @@ ksu_track_throne_compat
 # 而 kernel/supercall/dispatch.c 的 do_manager 注册用的是 KSU_IOCTL_MANAGER，
 # 于是这个被使用的名字在头文件里从未被声明。注意 manager.h / dynamic_manager.c
 # 在 builtin 与 main 里逐字节相同（且已由 ksu.c 引入），不需要从 main 搬文件，
-# 只要让 KSU_IOCTL_MANAGER 恰好被声明一次。上游对此先后出现过两种形态，都要认：
+# 只要让 KSU_IOCTL_MANAGER 恰好被声明一次。上游对此先后出现过三种状态，都要认：
 #   形态 A（a233901 起、c95d6e2 止）：那行还在，但标识符写成 KSU_IOCTL_KPM 且缺
 #     struct —— 就地改名并补 struct；
 #   形态 B（0af2cf9 起）：上游只把那行删掉（消掉了重名错误），dispatch.c 仍在引用
-#     KSU_IOCTL_MANAGER —— 按 main 在 KSU_IOCTL_KPM(200) 之前补回规范声明。
+#     KSU_IOCTL_MANAGER —— 按 main 在 KSU_IOCTL_KPM(200) 之前补回规范声明；
+#   形态 C（5ef32ad 起）：整批 per-feature ioctl 合并成单个 KSU_IOCTL_EXTENSION，
+#     旧名只剩注释 —— 无需处理（判据只取头文件，全树 grep 会命中注释而误判）。
 # 上游修正后本步骤按内容检测自动跳过。
 ksu_manager_ioctl_compat() {
   local candidates=(
@@ -533,15 +535,18 @@ ksu_manager_ioctl_compat() {
     return 0
   fi
 
-  local used_in SHAPE=""
-  used_in=$(grep -Rls 'KSU_IOCTL_MANAGER' \
-              "$KERNEL_ROOT/KernelSU" "$KERNEL_ROOT/common/drivers/kernelsu" 2>/dev/null \
-            | head -n 1 || true)
-  if [ -z "$used_in" ]; then
-    echo "KSU manager ioctl 兼容：树内未引用 KSU_IOCTL_MANAGER，无需处理"
+  # 上游 5ef32ad（2026-10-19）起把这批 per-feature ioctl（KPM / MANAGER /
+  # ADD_TRY_UMOUNT / LIST_TRY_UMOUNT / SET_SPOOF_CPU / ENABLE_KPM …）合并成单个
+  # KSU_IOCTL_EXTENSION（kernel/include/uapi/extension.h，nr 300），旧名只留在
+  # 注释里说明历史 —— 既没有 200 号 KPM 行可依，也没有真实引用，直接跳过。
+  # 判据只看头文件：不能拿"全树 grep 到 KSU_IOCTL_MANAGER"当引用判据，那会命中注释。
+  if ! grep -qE '\bKSU_IOCTL_KPM\b' "$uapi"; then
+    echo "KSU manager ioctl 兼容：$uapi 已无 KSU_IOCTL_KPM（上游改用 KSU_IOCTL_EXTENSION），跳过"
     return 0
   fi
-  echo "KSU manager ioctl 兼容：${used_in#"$KERNEL_ROOT"/} 引用了未声明的 KSU_IOCTL_MANAGER，补正 $uapi"
+
+  local SHAPE=""
+  echo "KSU manager ioctl 兼容：$uapi 缺 KSU_IOCTL_MANAGER 声明，补正"
 
   if grep -qE '\bKSU_IOCTL_[A-Z0-9_]+\b.*\bksu_manager_cmd\b' "$uapi"; then
     SHAPE=A
