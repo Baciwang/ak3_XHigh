@@ -628,3 +628,36 @@ ksu_throne_tracker_pkg_compat() {
   echo "KSU throne_tracker 兼容：已把块外的 pkg 换回 KSU_PACKAGE_NAME"
 }
 ksu_throne_tracker_pkg_compat
+
+# ---- 上游 throne_tracker.c 结构体初始化漏分号（2026-10-21 的新代码）----
+# search_manager() 里
+#   struct my_dir_context ctx = { .ctx.actor = my_actor,
+#                                 ...
+#                                 .depth = pos->depth }      ← 少了 ;
+# clang 报 `error: expected ';' at end of declaration`。同一批新代码里另外两个
+# 错误（throne_tracker.c 的 __attribute__((weak)) extern、以及把函数地址当布尔
+# 判断的 -Wpointer-bool-conversion）上游几个小时内已自行改成 static_call 方案，
+# 本步骤不处理；上游把这个分号补上后，这里按内容检测自动跳过。
+ksu_throne_tracker_semicolon_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/throne_tracker.c" \
+              "$KERNEL_ROOT/KernelSU/kernel/manager/throne_tracker.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ] || ! grep -qE '\.depth = pos->depth[[:space:]]*\}' "$f"; then
+    echo "KSU throne_tracker 分号兼容：无需处理（无该结构体初始化行），跳过"
+    return 0
+  fi
+  if grep -qE '\.depth = pos->depth[[:space:]]*\};' "$f"; then
+    echo "KSU throne_tracker 分号兼容：分号已在（上游已修），跳过"
+    return 0
+  fi
+  echo "KSU throne_tracker 分号兼容：为 my_dir_context 初始化补上缺失的分号"
+  perl -i -pe 's{^(\s*\.depth = pos->depth\s*\})(\s*)$}{$1;$2}' "$f"
+  if ! grep -qE '\.depth = pos->depth[[:space:]]*\};' "$f"; then
+    echo "::error::补分号失败（$f），请人工核对 manager/throne_tracker.c" >&2
+    exit 1
+  fi
+  echo "KSU throne_tracker 分号兼容：已补上"
+}
+ksu_throne_tracker_semicolon_compat
