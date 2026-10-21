@@ -661,3 +661,157 @@ ksu_throne_tracker_semicolon_compat() {
   echo "KSU throne_tracker 分号兼容：已补上"
 }
 ksu_throne_tracker_semicolon_compat
+
+# ---- 上游 shell_su_adb_only.c 条件编译未闭合（2026-10-21 的新代码）----
+# 上游 6d571adc 给这个文件加 KSU_COMPAT_USE_STATIC_KEY 守卫时，动手改坏了
+# ksu_shell_su_allowed_for_current()：本该收尾的 #endif 被写成了 #else，
+# 中间还夹着一句加守卫之前的残句（缩进都是 3 格，手工合并的痕迹）：
+#
+#   #ifdef KSU_COMPAT_USE_STATIC_KEY
+#       if (!static_branch_unlikely(&ksu_shell_su_adb_only)) {
+#           return true;
+#       }
+#      if (unlikely(ksu_shell_su_adb_only)) {   ← 残句：static_key 结构体当布尔用
+#           return true;
+#       }
+#   #else                                        ← 这里本该是 #endif
+#                                                ← 于是 #else 分支挨到文件尾，空的
+#       return has_trusted_ancestor();
+#   }                                            ← 函数右花括号被 #else 一起跳过
+#
+# 两个后果，第二个才是致命的：
+#   1) 残句那行 clang 报 invalid argument type 'struct static_key_false' to
+#      unary expression；
+#   2) 从 #else 到文件尾全被预处理掉 ⇒ 函数没了右花括号、条件编译悬到 EOF
+#      （unterminated conditional directive）。而 mount_hide.c、runtime/ksud.c
+#      是同一个编译单元里随后 #include 进来的，于是它们的正文全部被解析进这个
+#      没闭合的函数体内，报出十几条 "function definition is not allowed here"、
+#      "function declared in block scope cannot have 'static' storage class"。
+#      ——那一片报错都是级联，真因只有这一处。
+#
+# KSU_COMPAT_USE_STATIC_KEY 由 kernel_compat.h 里 LINUX_VERSION_CODE >= 4.3
+# 定义，本项目所有目标内核都满足 ⇒ 走的一定是 #ifdef 那一支；#else 那支只服务
+# 4.3 以前的内核，这里仍按官方 main 的语义（!static_branch_unlikely ↔ !flag）
+# 补全，免得日后有人往老内核回移时踩到反了的判据。
+#
+# 判据看内容不砍版本：文件里出现那句残句才动手（正确写法是 unlikely(!...，
+# 不会误命中）；上游自己修好后自动跳过；条件编译不平衡却又没有残句，说明是
+# 别的形态的破坏，直接报错不猜。重复执行幂等（重写完就是上面那份规范文本）。
+cond_balance() {
+  # 打印「#if* 比 #endif 多几个」；先剥注释，避免注释里的示例被当成真指令
+  perl -0777 -pe 's{/\*.*?\*/}{}gs; s{//[^\n]*}{}g' "$1" | awk '
+    { s=$0; sub(/^[ \t]+/,"",s)
+      if (s ~ /^#[ \t]*endif/) d--
+      else if (s ~ /^#[ \t]*if/) d++ }
+    END { print d+0 }'
+}
+
+ksu_shell_su_adb_only_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/feature/shell_su_adb_only.c" \
+              "$KERNEL_ROOT/KernelSU/kernel/feature/shell_su_adb_only.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ]; then
+    echo "KSU shell_su_adb_only 兼容：未找到 feature/shell_su_adb_only.c（该分支无此文件），跳过"
+    return 0
+  fi
+
+  local broken='unlikely(ksu_shell_su_adb_only)'
+  local sig='bool ksu_shell_su_allowed_for_current(void)'
+  if ! grep -qF "$broken" "$f"; then
+    local bal; bal=$(cond_balance "$f")
+    if [ "$bal" -ne 0 ]; then
+      echo "::error title=KSU shell_su_adb_only 兼容失败::$f 条件编译不平衡（#if 比 #endif 多 $bal）但未见已知残句，上游改动形态不认识，请人工核对" >&2
+      exit 1
+    fi
+    echo "KSU shell_su_adb_only 兼容：无需处理（无残句且条件编译平衡），跳过"
+    return 0
+  fi
+
+  echo "KSU shell_su_adb_only 兼容：ksu_shell_su_allowed_for_current() 的 #endif 被写成 #else，整段重写为规范形态"
+  # 从函数签名重写到该函数第一个顶格 } 为止（残句把右花括号吞了，所以“第一个顶格 }”
+  # 就是本函数真正的收尾）；不依赖残句那几行的缩进/换行，CRLF 检出也照改。
+  perl -0777 -i -pe '
+    my $nl = /\r\n/ ? "\r\n" : "\n";
+    my $sig = "bool ksu_shell_su_allowed_for_current(void)";
+    my $canon = join($nl,
+      $sig,
+      "{",
+      "#ifdef KSU_COMPAT_USE_STATIC_KEY",
+      "    if (!static_branch_unlikely(&ksu_shell_su_adb_only)) {",
+      "        return true;",
+      "    }",
+      "#else",
+      "    if (unlikely(!ksu_shell_su_adb_only)) {",
+      "        return true;",
+      "    }",
+      "#endif",
+      "",
+      "    return has_trusted_ancestor();",
+      "}"
+    );
+    my $re = qr{\Q$sig\E\r?\n\{\r?\n[\s\S]*?\r?\n\}};
+    my $n = s/$re/$canon/;
+    if ($n != 1) {
+      print STDERR "::error::shell_su_adb_only.c 里 $sig 匹配 $n 次（期望 1 次），请人工核对\n";
+      exit 1;
+    }
+  ' "$f" || exit 1
+
+  # 写后校验：残句没了、规范形态在、条件编译平衡
+  local bal; bal=$(cond_balance "$f")
+  if grep -qF "$broken" "$f" || [ "$bal" -ne 0 ] \
+    || ! grep -qF '#endif' "$f" \
+    || ! grep -qF 'unlikely(!ksu_shell_su_adb_only)' "$f"; then
+    echo "::error::shell_su_adb_only.c 补正失败（残句残留或条件编译仍不平衡，差值 $bal），请人工核对 $f" >&2
+    exit 1
+  fi
+  echo "KSU shell_su_adb_only 兼容：已闭合条件编译，函数收尾补回（条件编译差值 $bal）"
+}
+ksu_shell_su_adb_only_compat
+
+# ---- 兜底诊断：KernelSU 树的条件编译平衡 ----
+# 上面那个坑的报错形态极难认：真因（少一个 #endif）在 A 文件，clang 的报错却
+# 全落在同一个编译单元里随后 #include 进来的 B、C 文件上（"function definition
+# is not allowed here"、"function declared in block scope" 之类），看着像 B、C
+# 坏了。这一步只诊断、只报 warning，绝不阻断构建：同类破坏再现时，日志里会直接
+# 点名是哪个文件，省掉一轮 CI。
+# 先剥注释再数，免得注释里的示例指令被当成真指令；#endif 必须先判，
+# 因为它也以 "#if" 开头。
+ksu_cond_balance_scan() {
+  local kroot="" cand
+  for cand in "$KERNEL_ROOT/KernelSU/kernel" "$KERNEL_ROOT/common/drivers/kernelsu"; do
+    if [ -d "$cand" ]; then kroot="$cand"; break; fi
+  done
+  if [ -z "$kroot" ]; then
+    echo "KSU 条件编译平衡扫描：未找到 KernelSU 源码目录，跳过"
+    return 0
+  fi
+
+  # 注意：perl 程序里不能出现字面量 "{}"（含 s{...}{} 这种替换定界符），
+  # 否则 find -exec ... + 会报 "Only one instance of {} is supported" 而
+  # 一个文件都不扫。替换用 "!" 做定界符。
+  local hits=""
+  hits=$(find "$kroot" -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' \) -exec perl -e '
+    for my $f (@ARGV) {
+      open(my $fh, "<", $f) or next;
+      local $/; my $t = <$fh>; close $fh;
+      $t =~ s!/\*.*?\*/!!gs;
+      $t =~ s!//[^\n]*!!g;
+      my $d = 0;
+      for my $l (split /\n/, $t) {
+        (my $s = $l) =~ s/^\s+//;
+        if    ($s =~ /^#\s*endif/) { $d-- }
+        elsif ($s =~ /^#\s*if/)    { $d++ }
+      }
+      printf "%s  (%s %d 个 #endif)\n", $f, ($d > 0 ? "少" : "多"), abs($d) if $d != 0;
+    }' {} +) || hits=""
+
+  if [ -n "$hits" ]; then
+    echo "::warning title=KSU 条件编译不平衡（报错会落在别的文件上，真因在这里）::$hits"
+  else
+    echo "KSU 条件编译平衡扫描：$(find "$kroot" -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' \) | wc -l) 个文件全部平衡"
+  fi
+}
+ksu_cond_balance_scan
