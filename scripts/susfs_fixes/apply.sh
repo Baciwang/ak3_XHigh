@@ -33,6 +33,54 @@ if grep -qF 'VMA_PAD_START(vma)' "$SUSFS_PATCH" \
   sed -i 's/VMA_PAD_START(vma)/vma->vm_end/g' "$SUSFS_PATCH"
 fi
 
+# ---- 补丁的 fs/namespace.c 第一个 hunk 要求一行目标内核没有的 include ----
+# 2026-10-19 起 SUSFS 把 `#include <trace/hooks/blk.h>` 当 fs/namespace.c 第一个
+# hunk 的上下文行（要求存在）。6.1.157 的源里有这一行、树里也有该头文件；而
+# 6.1.57 这类旧子版本**连 include/trace/hooks/blk.h 这个文件都没有**（已实测
+# android14-6.1-2024-01_r24 为 404）—— 没法"给内核补上 include"，只能让它别要求。
+# 不做的话该 hunk 整个被拒：susfs_def.h、CL_COPY_MNT_NS 和那几个 extern 全丢，
+# 编译报一堆 use of undeclared identifier，而报错点还落在 namespace.c 的**使用处**，
+# 看着像 namespace.c 坏了（真因在补丁与内核的头文件差）。
+# 只按内容判断：补丁里有这行、且目标树没有该头文件，才动手；目标树有该头文件
+# （＝那行本来就在）时补丁一个字不动，幂等。
+susfs_patch_drop_blk_h_context() {
+  if ! grep -qF ' #include <trace/hooks/blk.h>' "$SUSFS_PATCH"; then
+    echo "SUSFS 补丁不含 trace/hooks/blk.h 上下文行，跳过"
+    return 0
+  fi
+  if [ -f ./include/trace/hooks/blk.h ]; then
+    echo "目标内核已有 include/trace/hooks/blk.h，补丁上下文可用，保留不动"
+    return 0
+  fi
+  echo "目标内核无 include/trace/hooks/blk.h：从 SUSFS 补丁去掉该上下文行并修正 hunk 行数"
+  # 删掉那行上下文后，该 hunk 头部的两侧行数要各减 1，否则 patch 认为补丁畸形。
+  # 只改「包含该行的那一个 hunk」，其余 hunk 不动。
+  perl -0777 -i -pe '
+    my @L = split /(?<=\n)/, $_;
+    my ($hdr, @n);
+    for my $i (0 .. $#L) {
+      if ($L[$i] =~ /^\@\@ /) {
+        if ($L[$i] =~ /^\@\@ -(\d+),(\d+) \+(\d+),(\d+) \@\@/) { $hdr = $i; @n = ($1, $2, $3, $4); }
+        else { $hdr = undef; }
+        next;
+      }
+      next unless $L[$i] eq " #include <trace/hooks/blk.h>\n";
+      die "blk.h 上下文行不在任何 hunk 内\n" unless defined $hdr;
+      (my $tail = $L[$hdr]) =~ s/^\@\@ -\d+,\d+ \+\d+,\d+ \@\@//;
+      $L[$hdr] = sprintf("\@\@ -%d,%d +%d,%d \@\@%s", $n[0], $n[1] - 1, $n[2], $n[3] - 1, $tail);
+      splice @L, $i, 1;
+      last;
+    }
+    $_ = join "", @L;
+  ' "$SUSFS_PATCH" || { echo "::error::从 SUSFS 补丁去掉 blk.h 上下文行失败" >&2; exit 1; }
+  if grep -qF ' #include <trace/hooks/blk.h>' "$SUSFS_PATCH"; then
+    echo "::error::SUSFS 补丁里仍残留 blk.h 上下文行" >&2
+    exit 1
+  fi
+  echo "SUSFS 补丁：blk.h 上下文行已去掉（hunk 行数同步修正）"
+}
+susfs_patch_drop_blk_h_context
+
 adjust_legacy_fdinfo_context() {
   sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
   perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
@@ -70,7 +118,14 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
   fi
   if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
     echo "临时调整 Android 13 5.15 LTS 头文件上下文"
-    sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+    # 只有当补丁不要求这行时才删：2026-10-19 起补丁把 `#include <trace/hooks/blk.h>`
+    # 当 namespace.c hunk 的上下文行（要求存在），删掉会让 hunk 失配。
+    if grep -q '^ #include <trace/hooks/blk\.h>' "$SUSFS_PATCH"; then
+      echo "SUSFS 补丁要求保留 namespace.c 的 trace/hooks/blk.h，跳过该临时调整"
+    else
+      sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+      LTS_BLK_H_DELETED=1
+    fi
     sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
   fi
 fi
@@ -235,7 +290,7 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
   fi
   if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
     echo "还原 Android 13 5.15 LTS 头文件上下文"
-    if ! grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
+    if [ "${LTS_BLK_H_DELETED:-0}" = "1" ] && ! grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
       sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
     fi
     if ! grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c; then
