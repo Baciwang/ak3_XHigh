@@ -16,14 +16,14 @@
 
 </div>
 
-## 📖 Introduction
+## Introduction
 
 Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository uses GitHub Actions to automatically compile Android GKI kernels. It integrates multiple KernelSU variants and SUSFS kernel-level spoofing solutions Add practical patches such as ZRAM and BBG.
 
 - The build workflows are adapted from [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) and [Wild Kernels](https://github.com/WildKernels/GKI_KernelSU_SUSFS)
 - Flashing rule: ***It can be flashed as long as the kernel version matches.***
 
-## 📦 Supported Kernel Versions
+## Supported Kernel Versions
 
 | Android | Kernel Version | Manual Workflow |
 |:---:|:---:|:---:|
@@ -34,22 +34,22 @@ Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository 
 | 16 | 6.12 | `kernel-a16-6-12.yml` |
 | Custom | Any | `kernel-custom.yml` |
 
-## ✨ Features
+## Features
 
 | Feature | Description |
 |:---|:---|
-| 🔐 KernelSU Variants | Supports SukiSU / BakaSU / FinaSU variants, selectable at build time |
-| 🔀 Build Channel | Release: latest **stable** upstream Release (tag commit + same-version manager), falls back to the newest official default-branch build when the upstream only ships pre-releases; Latest: pins the default-branch HEAD and picks the newest manager build matching that version |
-| 🙈 SUSFS | Kernel-level hiding working with KSU to complete environment spoofing |
-| 💾 ZRAM LZ4 | ZRAM Compression Algorithm Patch |
-| 🛡️ BBG (Baseband Guard) | BBG patch to protect the baseband partitions from accidental wipe |
-| 🌐 Network enhancement | Optional IPSet + BBR kernel config (BBR default congestion control, fq/fq_codel qdisc, full IPSet types up to 65534 sets, IPv6 NAT/masquerade, extra congestion algorithms) |
-| ⚡ KPM | Optional KPM feature / build-time patching |
-| 🔔 Re-Kernel | Optional Re-Kernel driver integration |
-| 🩹 CVE-2026-43499 | Optional automatic application of the rtmutex fix |
-| 📱 OnePlus Snapdragon 8 Elite / Gen5 Support | Optional: Add support for OnePlus Snapdragon 8 Elite / Gen5 processor |
-| 🐳 Droidspaces | Optional container support with NTSync kernel compatibility patch |
-| 🧩 Skip Incompatible | Optional: auto-skip incompatible or unusable features (except SUSFS and OnePlus 8 Elite/Gen5 support) instead of failing the build |
+|  KernelSU Variants | Supports SukiSU / BakaSU / FinaSU variants, selectable at build time |
+|  Build Channel | Release: latest **stable** upstream Release (tag commit + same-version manager), falls back to the newest official default-branch build when the upstream only ships pre-releases; Latest: pins the default-branch HEAD and picks the newest manager build matching that version |
+|  SUSFS | Kernel-level hiding working with KSU to complete environment spoofing |
+|  ZRAM LZ4 | ZRAM Compression Algorithm Patch |
+|  BBG (Baseband Guard) | BBG patch to protect the baseband partitions from accidental wipe |
+|  Network enhancement | Optional IPSet + BBR kernel config (BBR default congestion control, fq/fq_codel qdisc, full IPSet types up to 65534 sets, IPv6 NAT/masquerade, extra congestion algorithms) |
+|  KPM | Optional KPM feature / build-time patching |
+|  Re-Kernel | Optional Re-Kernel driver integration |
+|  CVE-2026-43499 | Optional automatic application of the rtmutex fix |
+|  OnePlus Snapdragon 8 Elite / Gen5 Support | Optional: Add support for OnePlus Snapdragon 8 Elite / Gen5 processor |
+|  Droidspaces | Optional container support with NTSync kernel compatibility patch |
+|  Skip Incompatible | Optional: auto-skip incompatible or unusable features (except SUSFS and OnePlus 8 Elite/Gen5 support) instead of failing the build |
 
 ## 🚀 Usage
 
@@ -96,7 +96,7 @@ A commit is a hash string representing the state of a repository at a certain po
 ## 🙏 Acknowledgments
 
 - [osm0sis/AnyKernel3](https://github.com/osm0sis/AnyKernel3)
-- [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) / [WildKernels/GKI_KernelSU_SUSFS](https://github.com/WildKernels/GKI_KernelSU_SUSFS)
+- [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) / [WildKernels/GKI_KernelSU_SUSFS](https://github.com/WildKernels/GKI_KernelSU_SUSFS) / [Lingluo17/Anykernel3](https:/github.com/Lingluo17/Anykernel3)
 - [SukiSU](https://sukisu.org/) / [BakaSU](https://bakasu.org/) / [FinaSU](https://github.com/LyraVoid/FinaSU)
 - [SUSFS](https://gitlab.com/simonpunk/susfs4ksu)
 
