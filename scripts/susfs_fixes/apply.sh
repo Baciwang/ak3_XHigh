@@ -636,7 +636,13 @@ ksu_manager_ioctl_compat
 #     use of undeclared identifier 'pkg'
 # main 分支该行用的是 KSU_PACKAGE_NAME（语义＝跳过内置管理器自己那条记录，
 # 见 main 对应循环里的 continue），按 main 换回去即可；块内那处合法用法不动。
-# 该文件里这串调用只会出现两次（一次块内、一次块外），据此判定并按内容跳过。
+#
+# 判据读产物本身，不按出现次数猜：只换「pkg 在该调用处不可见」的那几处。
+# 只看花括号深度不够 —— 残留那种情形（声明在 if 块里、调用在后面的同级 for
+# 块里）两者深度相同；要比的是「声明所在的那个块在调用处是否仍未闭合」。
+# 于是上游或其它分支把 pkg 提到函数作用域后（两处调用都合法）本步自动跳过，
+# 不再把合法调用改坏：FinaSU 就是这个形态，而且它的内核树没定义
+# KSU_PACKAGE_NAME，照 main 换过去会直接编不过（use of undeclared identifier）。
 ksu_throne_tracker_pkg_compat() {
   local f="" cand
   for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/throne_tracker.c" \
@@ -651,33 +657,91 @@ ksu_throne_tracker_pkg_compat() {
   local pat='strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)'
   local n
   n=$(grep -oF "$pat" "$f" | wc -l || true)
-  if [ "$n" -eq 1 ]; then
-    echo "KSU throne_tracker 兼容：pkg 只在 sig_fallback 块内使用，无需处理"
-    return 0
-  fi
   if [ "$n" -eq 0 ]; then
     echo "KSU throne_tracker 兼容：未找到 \"$pat\"（上游可能已重构该函数），跳过"
     return 0
   fi
-  if [ "$n" -ne 2 ]; then
-    echo "::error title=KSU throne_tracker 兼容失败::$f 中 \"$pat\" 出现 $n 次（期望 0/1/2 次），无法判定哪一处是块外残留，请对照 main 分支人工核对" >&2
+
+  # 逐处判定作用域，输出需要替换的序号（1 起、空格分隔）；空＝没有块外残留。
+  # 扫描时跳过注释与字符串/字符字面量（其中的花括号不作数），并维护「未闭合块
+  # 起始偏移」栈：声明记下自己所在的最内层块，调用记下当下打开的全部块，前者
+  # 属于后者、且声明在前，才算 pkg 在该处可见。
+  local need
+  need=$(perl -e '
+    my $c = do { local $/; <> };
+    defined $c or exit 0;
+    my $pat = q{strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)};
+    my $plen = length $pat;
+    my $len = length $c;
+    my (@decl, @occ, @open);
+    my $i = 0;
+    while ($i < $len) {
+      my $two = substr($c, $i, 2);
+      my $ch  = substr($c, $i, 1);
+      if ($two eq q{/*}) { my $e = index($c, q{*/}, $i + 2); $i = $e < 0 ? $len : $e + 2; next; }
+      if ($two eq q{//}) { my $e = index($c, "\n", $i + 2); $i = $e < 0 ? $len : $e + 1; next; }
+      if ($ch eq q{"} || $ch eq "\x27") {
+        my $q = $ch;
+        my $j = $i + 1;
+        while ($j < $len) {
+          my $x = substr($c, $j, 1);
+          if ($x eq "\\") { $j += 2; next; }
+          if ($x eq $q) { $j++; last; }
+          $j++;
+        }
+        $i = $j; next;
+      }
+      if ($ch eq chr(123)) { push @open, $i; $i++; next; }
+      if ($ch eq chr(125)) { pop @open; $i++; next; }
+      if (substr($c, $i, $plen) eq $pat) { push @occ, [$i, [@open]]; $i += $plen; next; }
+      if (substr($c, $i, 24) =~ /^char\s+pkg\s*\[/) { push @decl, [$i, @open ? $open[-1] : -1]; }
+      $i++;
+    }
+    my @need;
+    for my $k (0 .. $#occ) {
+      my ($o, $blocks) = @{$occ[$k]};
+      my $in = 0;
+      for my $dl (@decl) {
+        next unless $dl->[0] < $o;
+        next unless grep { $_ == $dl->[1] } @$blocks;
+        $in = 1; last;
+      }
+      push @need, $k + 1 unless $in;
+    }
+    print join(" ", @need);
+  ' "$f")
+
+  if [ -z "$need" ]; then
+    if [ "$n" -eq 1 ]; then
+      echo "KSU throne_tracker 兼容：pkg 只在 sig_fallback 块内使用（无块外残留），跳过"
+    else
+      echo "KSU throne_tracker 兼容：$n 处该调用都在 pkg 作用域内（无块外残留），跳过"
+    fi
+    return 0
+  fi
+
+  # 照 main 换回去之前先确认这棵树确实认识 KSU_PACKAGE_NAME —— 否则只是把
+  # 「未声明 pkg」换成「未声明 KSU_PACKAGE_NAME」，错误挪个位置而已。
+  if ! grep -qF 'KSU_PACKAGE_NAME' "$f"; then
+    echo "::error title=KSU throne_tracker 兼容失败::第 $need 处调用在 pkg 作用域外，但 $f 里不存在 KSU_PACKAGE_NAME，照 main 换回会引入未声明标识符，请人工核对" >&2
     exit 1
   fi
 
-  echo "KSU throne_tracker 兼容：块外残留引用了局部变量 pkg，按 main 换回 KSU_PACKAGE_NAME"
-  # 第一处在 if (sig_fallback) 块内（合法），只改最后一处
-  perl -0777 -i -pe '
+  echo "KSU throne_tracker 兼容：块外残留引用了局部变量 pkg（第 $need 处），按 main 换回 KSU_PACKAGE_NAME"
+  NEED=$(echo "$need" | tr ' ' ',') perl -0777 -i -pe '
+    BEGIN { %need = map { $_ => 1 } split /,/, ($ENV{NEED} // q{}) }
     my $pat = q{strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)};
-    my $n = () = /\Q$pat\E/g;
     my $i = 0;
-    s{\Q$pat\E}{ ++$i == $n ? "strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)" : $& }ge;
+    s{\Q$pat\E}{ ++$i; $need{$i} ? "strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)" : $& }ge;
   ' "$f"
 
-  # 写后校验：块内那处保留、块外那处已换掉
-  n=$(grep -oF "$pat" "$f" | wc -l || true)
-  if [ "$n" -ne 1 ] \
+  # 写后校验：只应少掉 $need 那么多处，且确实出现了 KSU_PACKAGE_NAME 写法
+  local left want
+  left=$(grep -oF "$pat" "$f" | wc -l || true)
+  want=$(( n - $(echo "$need" | wc -w) ))
+  if [ "$left" -ne "$want" ] \
     || ! grep -qF 'strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)' "$f"; then
-    echo "::error::throne_tracker.c 补正失败（剩余 \"$pat\" $n 处），请对照 main 分支人工核对" >&2
+    echo "::error::throne_tracker.c 补正失败（剩余 \"$pat\" $left 处，期望 $want 处），请对照 main 分支人工核对" >&2
     exit 1
   fi
   echo "KSU throne_tracker 兼容：已把块外的 pkg 换回 KSU_PACKAGE_NAME"
