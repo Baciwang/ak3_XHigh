@@ -150,7 +150,7 @@ on:
         type: boolean
         default: true
       a17_compat:
-        description: "支持 android17系统"
+        description: "启用 支持android17系统"
         required: false
         type: boolean
         default: false
