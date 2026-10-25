@@ -1,4 +1,3 @@
-# re-saved: register workflows on the standalone repo (Actions indexing quirk)
 name: 内核构建流程
 
 permissions:
@@ -31,6 +30,26 @@ on:
       ksu_variant:
         required: true
         type: string
+      build_channel:
+        description: "构建通道：正式 (Release) 对齐官方发行版；最新 (HEAD) 跟随上游最新提交（仅用于标识与摘要）"
+        required: false
+        type: string
+        default: "正式 (Release)"
+      ksu_commit:
+        description: "BakaSU 专用：KernelSU 检出到该提交以对齐官方最新上传构建（留空跟随 main HEAD）"
+        required: false
+        type: string
+        default: ""
+      ksu_cert_size:
+        description: "FinaSU 专用：管理器签名证书 DER 尺寸（0x 十六进制，第二信任槽对齐用）"
+        required: false
+        type: string
+        default: ""
+      ksu_cert_hash:
+        description: "FinaSU 专用：管理器签名证书 SHA256（第二信任槽对齐用）"
+        required: false
+        type: string
+        default: ""
 
       # ==================== 可选配置 ====================
       version:
@@ -74,6 +93,10 @@ on:
         required: true
         type: boolean
         default: true
+      supp_op:
+        required: false
+        type: boolean
+        default: false
       droidspaces:
         required: false
         type: string
@@ -91,20 +114,11 @@ on:
         required: false
         type: boolean
         default: false
-      a17_compat:
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.display_sub || inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
-    runs-on: ubuntu-24.04
-    # 钉住镜像：linux 内核构建里的 perl 由 AOSP prebuilts/build-tools 提供
-    # （lib/build_OID_registry 用 $(PERL)），其 XS 模块只匹配固定版本的系统 perl；
-    # ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26，系统 perl 版本一变就报
-    # "Cwd.c: loadable library and perl binaries are mismatched"（lib/oid_registry_data.c 生成失败）。
-    # 等 AOSP build-tools 跟进新 perl 后再考虑放开。
+    runs-on: ubuntu-latest
     # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
     timeout-minutes: 90
 
@@ -113,8 +127,6 @@ jobs:
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
       SKIP_INCOMPATIBLE: ${{ inputs.skip_incompatible }}
-      # android16-6.12.69 专用：使用仓库内合并的 Kokuban sm8850 源码（可开机基线），不走 AOSP repo sync
-      BUILTIN_SOURCE: ${{ inputs.android_version == 'android16' && inputs.sub_level == '69' }}
 
     steps:
       - name: 构建信息摘要
@@ -127,6 +139,7 @@ jobs:
           echo "子版本号      : ${{ inputs.sub_level }}"
           echo "补丁级别      : ${{ inputs.os_patch_level }}"
           echo "KSU 变体      : ${{ inputs.ksu_variant }}"
+          echo "构建通道      : ${{ inputs.build_channel }}"
           echo "构建时间      : ${{ inputs.build_time }}"
           echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
           echo "ZRAM 压缩     : ${{ inputs.use_zram }}"
@@ -138,7 +151,6 @@ jobs:
           echo "Droidspaces   : ${{ inputs.droidspaces }}"
           echo "NTSync        : ${{ inputs.droidspaces_ntsync }}"
           echo "兼容跳过      : ${{ inputs.skip_incompatible }}"
-          echo "目标系统      : ${{ inputs.a17_compat == true && 'Android 17' || 'Android 12-16' }}"
           echo "产物上传模式  : ${{ inputs.artifact_upload_mode }}"
           echo "========================================"
 
@@ -199,31 +211,7 @@ jobs:
       - name: 安装编译依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves lz4 libdw-dev
-
-      # 发行版自带的 pahole（dwarves 1.2x）对 per-CPU 变量有 4096 个的硬上限，
-      # sm8850 源码远超该数，pahole 会写出 libbpf 无法加载的 BTF，最终表现为：
-      #   BTF     .tmp_vmlinux1.btf.o
-      #   Reached the limit of per-CPU variables: 4096
-      #   BTFIDS  vmlinux
-      #   FAILED: load BTF from vmlinux: Invalid argument
-      # 故 BUILTIN_SOURCE（make 路径）改为源码编译新版 pahole 到 /usr/local/bin。
-      - name: 源码编译新版 pahole（BUILTIN_SOURCE 需要）
-        if: env.BUILTIN_SOURCE == 'true'
-        run: |
-          sudo apt-get install -y cmake zlib1g-dev
-          git clone --depth=1 https://git.kernel.org/pub/scm/devel/pahole/pahole.git /tmp/pahole
-          cmake -S /tmp/pahole -B /tmp/pahole/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/pahole/build -j"$(nproc --all)"
-          sudo cmake --install /tmp/pahole/build
-          # 装进 /usr/local/lib 的 libdwarves*.so 必须让动态链接器看得见，
-          # 否则 pahole 一执行就是 cannot open shared object file（退出码 127）。
-          sudo ldconfig
-          echo "LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          hash -r
-          echo "PATH 中的 pahole: $(command -v pahole)"
-          test "$(command -v pahole)" = "/usr/local/bin/pahole" || echo "::warning::PATH 中的 pahole 不是 /usr/local/bin/pahole"
-          /usr/local/bin/pahole --version || { echo "::error::新版 pahole 无法执行（共享库路径问题）"; exit 1; }
+          sudo apt-get install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves lz4
 
       - name: 配置 ccache
         run: |
@@ -259,7 +247,7 @@ jobs:
           path: |
             kernel-build-tools
             mkbootimg
-          key: toolchain-${{ runner.os }}-v2
+          key: toolchain-${{ runner.os }}-v1
 
       - name: 下载工具链
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
@@ -268,34 +256,6 @@ jobs:
           BRANCH=main-kernel-build-2024
           git clone $AOSP_MIRROR/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
           git clone $AOSP_MIRROR/platform/system/tools/mkbootimg -b $BRANCH --depth 1 mkbootimg
-
-      - name: 下载 Kokuban 工具链（sm8850 专用：clang-r536225 + rust + bindgen）
-        if: env.BUILTIN_SOURCE == 'true'
-        run: |
-          TC="$KERNEL_ROOT/toolchain"
-          mkdir -p "$TC" && cd "$TC"
-          BASE="https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225"
-          curl -fL --retry 3 -o clang.zip "$BASE/clang-r536225.zip"
-          curl -fL --retry 3 -o rust.zip "$BASE/rust.zip"
-          curl -fL --retry 3 -o build-tools.zip "$BASE/build-tools.zip"
-          curl -fL --retry 3 -o bindgen.tar.xz "https://github.com/rust-lang/rust-bindgen/releases/download/v0.69.5/bindgen-cli-x86_64-unknown-linux-gnu.tar.xz"
-          unzip -q clang.zip -d clang && unzip -q rust.zip -d rust && unzip -q build-tools.zip -d build-tools
-          mkdir -p bindgen && tar -xJf bindgen.tar.xz -C bindgen --strip-components=1
-          CLANG_DIR="$(dirname "$(find "$TC" -type f -name clang | head -1)")"
-          RUSTC="$(find "$TC" -type f -name rustc | head -1)"
-          BINDGEN="$(find "$TC" -type f -name bindgen | head -1)"
-          test -n "$CLANG_DIR" -a -n "$RUSTC" -a -n "$BINDGEN" || { echo "::error::工具链解压布局异常"; find "$TC" -maxdepth 2 | head -30; exit 1; }
-          LIBCLANG_DIR="$(dirname "$(find "$TC" -name "libclang.so*" | head -1)")"
-          {
-            echo "TC_CLANG_BIN=$CLANG_DIR"
-            echo "TC_RUSTC=$RUSTC"
-            echo "TC_BINDGEN=$BINDGEN"
-            echo "LIBCLANG_PATH=${LIBCLANG_DIR:-$CLANG_DIR/../lib}"
-            echo "$CLANG_DIR" >> "$GITHUB_PATH"
-            echo "$(dirname "$RUSTC")" >> "$GITHUB_PATH"
-            echo "$(dirname "$BINDGEN")" >> "$GITHUB_PATH"
-          } >> "$GITHUB_ENV"
-          echo "clang: $CLANG_DIR | rustc: $RUSTC | bindgen: $BINDGEN"
 
       - name: 生成签名密钥
         run: |
@@ -353,27 +313,7 @@ jobs:
           echo "使用当前仓库补丁目录: $ZZH_PATCHES"
           git clone https://github.com/Numbersf/Action-Build.git --depth=1
 
-      # 用本仓库的通用模板覆盖上游 WildKernels 的 anykernel.sh：
-      # 上游脚本只认 5.10/5.15/6.1/6.6/6.12 内核环境；通用模板自动识别 init_boot
-      # 布局（Android 13+ 仅刷内核），并按 a17_compat 开关注入系统版本门槛：
-      #   关闭（默认）= 仅允许 Android 12-16 系统刷入
-      #   开启        = 仅允许 Android 17 系统刷入
-      # 内核版本规则不变：刷入包内核须与设备当前 GKI 内核同版本系（如 5.10.x）。
-      - name: 应用 AnyKernel3 刷入模板（按 A17 开关注入系统版本门槛）
-        run: |
-          if [ "${{ inputs.a17_compat }}" = "true" ]; then
-            TARGET_SYS="a17"
-            GATE_MSG="仅允许 Android 17 系统刷入"
-          else
-            TARGET_SYS="a12-16"
-            GATE_MSG="仅允许 Android 12-16 系统刷入"
-          fi
-          sed "s|@@TARGET_SYS@@|$TARGET_SYS|" "$GITHUB_WORKSPACE/ak3-template/anykernel.sh" > "$ANYKERNEL3/anykernel.sh"
-          grep -q "TARGET_SYS=\"$TARGET_SYS\"" "$ANYKERNEL3/anykernel.sh" || { echo "::error::系统版本门槛注入失败"; exit 1; }
-          echo "已覆盖上游 anykernel.sh：$GATE_MSG"
-
       - name: 初始化并同步内核源码
-        if: env.BUILTIN_SOURCE != 'true'
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-6.4.1.git gcc
@@ -424,17 +364,6 @@ jobs:
             exit 1
           fi
           echo "REMOTE_BRANCH=$REMOTE_BRANCH" >> $GITHUB_ENV
-
-      - name: 使用合并的 sm8850 内核源码（android16-6.12.69 专用）
-        if: env.BUILTIN_SOURCE == 'true'
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          echo "BUILTIN_SOURCE=true：跳过 AOSP repo sync，使用仓库内 kernel/sm8850（Kokuban android16-6.12 可开机基线）"
-          cp -a "$GITHUB_WORKSPACE/kernel/sm8850" ./common
-          # zip -> Windows 路径丢失可执行位，kbuild 会直接调用散布全树的脚本
-          # （scripts/、arch/*/vdso、tools/ 等），对整个源码树统一补回
-          chmod -R u+x ./common
-          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) " ./common/Makefile
 
       - name: 提取实际子版本号
         run: |
@@ -505,6 +434,13 @@ jobs:
             fi
           fi
 
+      - name: 添加 一加 骁龙8 Elite/Gen5 处理器支持
+        if: inputs.supp_op
+        working-directory: ${{ env.KERNEL_ROOT }}/common/drivers
+        run: |
+          echo "使用本仓库 hmbird_patch.c..."
+          cp "$GITHUB_WORKSPACE/hmbird_patch.c" ./hmbird_patch.c
+          echo "obj-y += hmbird_patch.o" >> Makefile
 
       - name: 确定 KernelSU 分支
         id: ksu-branch
@@ -512,8 +448,11 @@ jobs:
           variant_input="${{ inputs.ksu_variant }}"
 
           case "$variant_input" in
-            "BakaSU"|"ReSukiSU")
+            "BakaSU")
               BRANCH="-s main"
+              ;;
+            "FinaSU")
+              BRANCH="-s master"
               ;;
             "SukiSU")
               if [ "${{ inputs.enable_susfs }}" = "false" ]; then
@@ -546,17 +485,153 @@ jobs:
 
       - name: 添加 KernelSU
         working-directory: ${{ env.KERNEL_ROOT }}
+        env:
+          KSU_COMMIT: ${{ inputs.ksu_commit }}
+          KSU_CERT_SIZE: ${{ inputs.ksu_cert_size }}
+          KSU_CERT_HASH: ${{ inputs.ksu_cert_hash }}
         run: |
           case "${{ inputs.ksu_variant }}" in
             "SukiSU")
               echo "添加 ${{ inputs.ksu_variant }}..."
               curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $BRANCH
+              # 内核侧 KSU 版本来源对齐官方最新上传 Manager 构建：
+              # SukiSU 版本号 = 40000 + REPO_BRANCH 指向分支的提交数 - 2815
+              #（main 分支定义在 kernel/Kbuild，builtin 分支定义在 kernel/Makefile，
+              #  优先 GitHub API，回退本地 rev-list）。将 REPO_BRANCH 改写为官方
+              # 构建提交，保证内核 KSU 版本与拉取的管理器安装包严格一致
+              if [ -n "$KSU_COMMIT" ] && [ "$BRANCH" != "-s main" ] && [ "$BRANCH" != "-s builtin" ]; then
+                echo "SukiSU 使用自定义提交（$BRANCH），跳过管理器版本对齐"
+              elif [ -n "$KSU_COMMIT" ]; then
+                if ! git -C KernelSU fetch origin "$KSU_COMMIT" 2>/dev/null; then
+                  echo "官方构建提交 $KSU_COMMIT 已存在于本地克隆，跳过 fetch"
+                fi
+                if ! git -C KernelSU cat-file -e "$KSU_COMMIT^{commit}" 2>/dev/null; then
+                  echo "::error::官方构建提交 $KSU_COMMIT 不在 KernelSU 仓库中，无法对齐版本来源"
+                  exit 1
+                fi
+                if [ "$BRANCH" = "-s builtin" ]; then
+                  KSU_VERSION_SOURCE="KernelSU/kernel/Makefile"
+                else
+                  KSU_VERSION_SOURCE="KernelSU/kernel/Kbuild"
+                fi
+                if ! sed -i -E "s|^(REPO_BRANCH[[:space:]]*[:?+]?=)[[:space:]]*main[[:space:]]*\$|\1 $KSU_COMMIT|" "$KSU_VERSION_SOURCE"; then
+                  echo "::error::改写 $KSU_VERSION_SOURCE 的 REPO_BRANCH 失败，无法对齐管理器版本"
+                  exit 1
+                fi
+                if ! grep -qE "^REPO_BRANCH[[:space:]]*[:?+]?=[[:space:]]*$KSU_COMMIT[[:space:]]*\$" "$KSU_VERSION_SOURCE"; then
+                  echo "::error::未能在 $KSU_VERSION_SOURCE 中对齐 REPO_BRANCH（上游结构可能已变化），无法对齐管理器版本"
+                  exit 1
+                fi
+                echo "SukiSU 内核侧版本来源已对齐官方上传构建提交 $KSU_COMMIT (KSU 版本 $((40000 + $(git -C KernelSU rev-list --count "$KSU_COMMIT") - 2815)))"
+              fi
               bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU sukisu
               ;;
-            "BakaSU"|"ReSukiSU")
+            "BakaSU")
               echo "添加 BakaSU..."
               curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash $BRANCH
+              # 内核侧 KernelSU 检出到官方最新上传 Manager 构建的同一提交
+              #（Kbuild 以 30700 + git 提交数 计算版本，与官方管理器 versionCode 同源同值），
+              # 保证内核 KSU 版本与拉取的管理器安装包严格一致
+              if [ -n "$KSU_COMMIT" ]; then
+                if ! git -C KernelSU checkout --detach "$KSU_COMMIT" 2>/dev/null; then
+                  git -C KernelSU fetch origin "$KSU_COMMIT"
+                  git -C KernelSU checkout --detach "$KSU_COMMIT"
+                fi
+                if [ "$(git -C KernelSU rev-parse HEAD)" != "$KSU_COMMIT" ]; then
+                  echo "::error::KernelSU 检出官方构建提交 $KSU_COMMIT 失败，无法对齐管理器版本"
+                  exit 1
+                fi
+                echo "KernelSU 已检出到官方上传构建提交 $KSU_COMMIT (KSU 版本 $((30700 + $(git -C KernelSU rev-list --count HEAD))))"
+              fi
               bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU bakasu
+              # 上游 BakaSU 自 48fa4bb 起以无条件 $(error) 暂停 SUSFS 内核构建
+              # （等待 simonpunk 同步最新 selinux_hide 模型）。本仓库在 SUSFS 补丁
+              # 阶段已适配该模型（scripts/susfs_fixes/apply.sh），这里替换为上游
+              # 预期的按内核版本门控，详见 scripts/bakasu_compat/resume_susfs.sh
+              bash "$GITHUB_WORKSPACE/scripts/bakasu_compat/resume_susfs.sh" KernelSU
+              ;;
+            "FinaSU")
+              echo "添加 ${{ inputs.ksu_variant }}..."
+              git clone https://github.com/LyraVoid/FinaSU.git KernelSU
+              # 内核侧检出到官方最新 Release 的同一提交（ksuCommit 由 get-manager
+              # 从 Release tag 解析；Kbuild 以 30000 + git 提交数 计算版本，与官方
+              # 发行管理器 versionCode 同源同值），保证与发行的管理器严格一致
+              if [ -n "$KSU_COMMIT" ]; then
+                if ! git -C KernelSU checkout --detach "$KSU_COMMIT" 2>/dev/null; then
+                  git -C KernelSU fetch origin "$KSU_COMMIT"
+                  git -C KernelSU checkout --detach "$KSU_COMMIT"
+                fi
+                if [ "$(git -C KernelSU rev-parse HEAD)" != "$KSU_COMMIT" ]; then
+                  echo "::error::KernelSU 检出官方构建提交 $KSU_COMMIT 失败，无法对齐管理器版本"
+                  exit 1
+                fi
+                echo "KernelSU 已检出到官方上传构建提交 $KSU_COMMIT (KSU 版本 $((30000 + $(git -C KernelSU rev-list --count HEAD))))"
+              fi
+              # FinaSU 自带的 kernel/setup.sh 仍克隆上游 tiann/KernelSU，此处手动完成
+              # in-tree 集成：软链驱动目录并挂载 Makefile / Kconfig
+              DRIVER_DIR="$KERNEL_ROOT/common/drivers"
+              ln -sfn "$(realpath --relative-to="$DRIVER_DIR" "$KERNEL_ROOT/KernelSU/kernel")" "$DRIVER_DIR/kernelsu"
+              grep -q "obj-.*CONFIG_KSU.*kernelsu/" "$DRIVER_DIR/Makefile" || \
+                echo 'obj-$(CONFIG_KSU) += kernelsu/' >> "$DRIVER_DIR/Makefile"
+              if ! grep -q 'source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"; then
+                sed -i "/endmenu/i source \"drivers/kernelsu/Kconfig\"" "$DRIVER_DIR/Kconfig"
+              fi
+              # SUSFS 场景：上游已树内原生集成，驱动侧无需补丁，
+              # 由 scripts/susfs_fixes/apply.sh 统一校验并应用内核侧主补丁
+
+              # 将 FinaSU 官方管理器签名证书注入内核第二信任槽（EXPECTED_SIZE2/HASH2）。
+              # 不注入时内核仅信任上游 KernelSU 默认槽，官方 KernelSU 管理器会抢占
+              # manager 身份，FinaSU 管理器显示"未安装"。
+              if [ -z "$KSU_CERT_SIZE" ] || [ -z "$KSU_CERT_HASH" ]; then
+                echo "管理器证书未由 get-manager 传入，回退到 FinaSU 最新 Release APK 提取..."
+                REL_APK=$(mktemp -d)/manager.apk
+                REL_JSON=""
+                for ATTEMPT in 1 2 3; do
+                  REL_JSON=$(curl -s --fail --max-time 30 \
+                    "https://api.github.com/repos/LyraVoid/FinaSU/releases/latest") \
+                    && [ -n "$REL_JSON" ] && break
+                  echo "获取 Release 信息失败，重试 ($ATTEMPT/3)..."
+                  sleep 5
+                done
+                REL_URL=$(printf '%s' "$REL_JSON" | python3 -c \
+                  "import json,sys; d=json.load(sys.stdin); print(next(a['browser_download_url'] for a in d.get('assets',[]) if a['name'].endswith('.apk')))" 2>/dev/null || true)
+                if [ -z "$REL_URL" ]; then
+                  echo "::error::无法获取 FinaSU 管理器签名证书：get-manager 未传入且最新 Release 中没有 APK 资产，FinaSU 管理器将无法被内核识别"
+                  exit 1
+                fi
+                curl -sL --fail --retry 3 --max-time 300 -o "$REL_APK" "$REL_URL" || {
+                  echo "::error::下载 FinaSU Release APK 失败，无法提取管理器签名证书"
+                  exit 1
+                }
+                CERT_INFO=$(python3 "$GITHUB_WORKSPACE/scripts/finasu_compat/extract_manager_cert.py" "$REL_APK" | head -n1)
+                KSU_CERT_SIZE=$(echo "$CERT_INFO" | awk '{print $1}')
+                KSU_CERT_HASH=$(echo "$CERT_INFO" | awk '{print $2}')
+              fi
+              if [ -z "$KSU_CERT_SIZE" ] || [ -z "$KSU_CERT_HASH" ]; then
+                echo "::error::FinaSU 管理器签名证书提取失败，FinaSU 管理器将无法被内核识别"
+                exit 1
+              fi
+              echo "注入 FinaSU 管理器签名证书到内核第二信任槽: size=$KSU_CERT_SIZE sha256=$KSU_CERT_HASH"
+              awk -v size="$KSU_CERT_SIZE" -v hash="$KSU_CERT_HASH" '
+                !done && /^ccflags-y \+= -DEXPECTED_HASH=/ {
+                  print
+                  print "# injected by GKI_FinaSU_SUSFS: trust the official FinaSU manager via the second signature slot"
+                  print "KSU_EXPECTED_SIZE2 := " size
+                  print "KSU_EXPECTED_HASH2 := " hash
+                  print "KSU_SECOND_SIGNATURE_RELEASE := 1"
+                  done = 1
+                  next
+                }
+                { print }
+              ' KernelSU/kernel/Kbuild > KernelSU/kernel/Kbuild.new && mv KernelSU/kernel/Kbuild.new KernelSU/kernel/Kbuild
+              grep -q "^KSU_EXPECTED_SIZE2 := " KernelSU/kernel/Kbuild \
+                && grep -q "^KSU_EXPECTED_HASH2 := " KernelSU/kernel/Kbuild \
+                && grep -q "^KSU_SECOND_SIGNATURE_RELEASE := 1" KernelSU/kernel/Kbuild \
+                || { echo "::error::Kbuild 注入失败（锚点行缺失，FinaSU 上游 Kbuild 结构可能已变化）"; exit 1; }
+              # 与 SukiSU/BakaSU 一致：内核完整版本的 @<branch> 固定为品牌名
+              # （CI 检出的是 detached 提交，abbrev-ref 显示 @HEAD）；
+              # 必须在上方证书注入（awk 重写 Kbuild）之后调用
+              bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU finasu
               ;;
             *)
               echo "未知变体: ${{ inputs.ksu_variant }}" >&2
@@ -571,94 +646,30 @@ jobs:
             echo "KSU_LATEST_COMMIT_DATE=未知" >> $GITHUB_ENV
           fi
 
+      # FinaSU 的内核侧 SUSFS 集成已并入 scripts/susfs_fixes/apply.sh：
+      # 上游自 5b83330b（2026-10-23）起树内原生集成 SUSFS，与 SukiSU/BakaSU
+      # 同为「驱动侧不打补丁」形态，由「应用 SUSFS 补丁」步骤统一校验并应用
+
       # SukiSU 的 builtin 分支（内建+SUSFS 产品线）与 main 分支相互独立，
-      # UAPI 版本落后于官方管理器（管理器按 main 分支构建）。
-      # 内核 UAPI < 管理 UAPI 时，管理器首页会误报"需要更新内核"。
-      # 此步骤把官方 main 的 UAPI 2->5 内核侧提交/常量移植到 builtin 检出：
-      #   - 86e9b3bf: scoped su-session driver fd (UAPI 3)
-      #   - dda78702: KSU_GET_INFO_FLAG_BUNDLED (UAPI 4, 仅 UAPI 号+flag 常量,
-      #     其 MODULE 部分依赖 builtin 不存在的 ksu_bundled，内建编译不参与)
-      #   - EVENT_SERVICES 的 start/skip 返回语义 (UAPI 5)：builtin 的实现与
-      #     main 逐字相同，缺的只是版本号（并非常量或 ioctl）。
-      # 若上游 builtin 日后自行同步 UAPI >= 5，本步骤自动跳过。
-      # 注意：上游可能只 backport 了一部分（例如 ksu_install_su_fd /
-      # allow_su_session 已进 builtin，但版本号与 FLAG_BUNDLED 没动）。
-      # 那时 patch 会把已存在的 hunk 判为 "previously applied" 并以非 0 退出，
-      # 这并非错误，故本步骤容忍 patch 退出码，一律以补丁后的内容校验为准。
-      # 版本校验取 ">= 5"（对齐目标即管理器当前 UAPI）：写死等号会把上游已
-      # 前进的分支（例如走 main 布局的 SukiSU+关闭 SUSFS）误判为失败。
+      # 官方管理器 APK 始终按 main 分支构建。main 抬升
+      # KERNEL_SU_UAPI_VERSION 时（如 3b60791 UAPI 6 新增
+      # KSU_IOCTL_LOOKUP_SYMBOLS + KSU_GET_INFO_FLAG_PREINIT），builtin
+      # 检出内核 UAPI 落后于管理器，首页报"需要更新内核"
+      # （Natives.kt: managerUAPIVersion > kernelUAPIVersion）。
+      # 此步骤动态同步：读取官方 main 的 uapi/supercall.h，把缺失常量/结构
+      # 按 main 原文移植进 builtin 检出并抬升 UAPI 号，UAPI >= 6 时附带
+      # 注入 LOOKUP_SYMBOLS 处理器 + symbol_resolver 内核侧能力；
+      # 上游 builtin 自行同步后自动跳过，详见 scripts/ksu_uapi_sync/sync_uapi.sh
       - name: 同步 SukiSU 内核 UAPI 版本（对齐官方管理器）
         if: inputs.ksu_variant == 'SukiSU'
         working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          # builtin 分支: kernel/include/uapi/supercall.h；main 分支: uapi/supercall.h
-          UAPI_FILE=""
-          for f in KernelSU/kernel/include/uapi/supercall.h KernelSU/uapi/supercall.h; do
-            if [ -f "$f" ]; then
-              UAPI_FILE="$f"
-              break
-            fi
-          done
-          if [ -z "$UAPI_FILE" ]; then
-            echo "::error::未找到 supercall.h，SukiSU 源码布局可能已变化"
-            exit 1
-          fi
-
-          read_uapi() {
-            grep -ohE 'KERNEL_SU_UAPI_VERSION[^0-9]*[0-9]+' "$UAPI_FILE" | grep -oE '[0-9]+' | tail -n 1
-          }
-
-          CURRENT_UAPI=$(read_uapi)
-          echo "builtin 分支当前 UAPI 版本: ${CURRENT_UAPI:-未知}"
-
-          PATCHED=false
-          if [ "${CURRENT_UAPI:-0}" -ge 5 ]; then
-            echo "上游已包含 UAPI >= 5，跳过本地对齐补丁"
-          else
-            PATCH_FILE="$GITHUB_WORKSPACE/scripts/ksu_uapi_sync/builtin-uapi5.patch"
-            if patch -p1 --forward -d KernelSU < "$PATCH_FILE"; then
-              echo "已应用 UAPI 5 对齐补丁 (su-session fd + FLAG_BUNDLED + EVENT_SERVICES start/skip)"
-            else
-              echo "::warning title=UAPI 对齐补丁未完全套用::部分 hunk 判定为已应用（上游已 backport）或被拒，转入内容校验"
-            fi
-            REJECTS=$(find KernelSU -name '*.rej' | head -n 20)
-            if [ -n "$REJECTS" ]; then
-              echo "::warning title=存在未套用的 hunk::$(echo "$REJECTS" | tr '\n' ' ')"
-              find KernelSU -name '*.rej' -delete
-            fi
-            PATCHED=true
-          fi
-
-          FINAL_UAPI=$(read_uapi)
-          if [ "${FINAL_UAPI:-0}" -lt 5 ]; then
-            echo "::error::UAPI 版本校验失败（期望 >= 5，实际 ${FINAL_UAPI:-未知}）：补丁 hunk 可能被拒，请重新生成 scripts/ksu_uapi_sync/builtin-uapi5.patch"
-            exit 1
-          fi
-
-          if [ "$PATCHED" = true ]; then
-            # 补丁涉及的功能符号必须齐备（无论来自本补丁还是上游 backport）
-            MISSING=""
-            grep -q "KSU_GET_INFO_FLAG_BUNDLED" "$UAPI_FILE" \
-              || MISSING="$MISSING uapi/supercall.h:FLAG_BUNDLED"
-            grep -q "ksu_install_su_fd" KernelSU/kernel/supercall/supercall.c \
-              || MISSING="$MISSING supercall.c:ksu_install_su_fd"
-            grep -q "ksu_is_su_session_fd" KernelSU/kernel/supercall/supercall.h \
-              || MISSING="$MISSING supercall.h:ksu_is_su_session_fd"
-            grep -q "allow_su_session" KernelSU/kernel/supercall/dispatch.c \
-              || MISSING="$MISSING dispatch.c:allow_su_session"
-            grep -q "services_started" KernelSU/kernel/supercall/dispatch.c \
-              || MISSING="$MISSING dispatch.c:services_started(UAPI5 EVENT_SERVICES start/skip)"
-            if [ -n "$MISSING" ]; then
-              echo "::error::UAPI 对齐不完整，缺少:$MISSING（请重新生成 scripts/ksu_uapi_sync/builtin-uapi5.patch）"
-              exit 1
-            fi
-          fi
-          echo "内核 UAPI 已对齐官方管理器 (v${FINAL_UAPI})，刷入后不再出现\"需要更新内核\"提示"
+        run: bash "$GITHUB_WORKSPACE/scripts/ksu_uapi_sync/sync_uapi.sh" KernelSU
 
       # SukiSU builtin 分支的 hook/lsm_hook.c 仍以旧签名调用
       # security_add_hooks(hooks, count, "ksu")，6.8+ 内核要求 const struct lsm_id *，
-      # android16-6.12 GKI 编译直接失败；kpm/super_access.c 引用的
-      # netlink_kernel_cfg.cb_mutex 在 Linux 6.11 被移除，KPM 开启时同样失败。
+      # android16-6.12 GKI 编译直接失败；kpm super_access.c 引用的
+      # netlink_kernel_cfg.cb_mutex 在 Linux 6.11 被移除，KPM 开启时同样失败
+      # （该文件已被上游迁至 kernel/extension/kpm/，补丁按实际路径定位）。
       # 补丁内部以 LINUX_VERSION_CODE 守卫，6.10 及以下内核行为不变，
       # SukiSU 上游修复后按内容检测自动跳过。
       - name: 应用 SukiSU 内核 API 兼容补丁 (6.8+ lsm_id / 6.11+ netlink cb_mutex)
@@ -1297,7 +1308,13 @@ jobs:
           CONFIG_TMPFS_POSIX_ACL=y
           EOF
 
-          if [ "${{ inputs.ksu_variant }}" == "SukiSU" ] || [ "${{ inputs.ksu_variant }}" == "BakaSU" ] || [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+          # BakaSU 上游改名后 Kconfig 默认值去掉了 @%REPO_NAME%，显式加回模板，
+          # 配合 ksu_post_setup.sh 的 REPO_NAME := LingLuo 改写，管理器才能显示 @LingLuo 后缀
+          if [ "${{ inputs.ksu_variant }}" == "BakaSU" ]; then
+            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%"' >> "$DEFCONFIG"
+          fi
+
+          if [ "${{ inputs.ksu_variant }}" == "SukiSU" ] || [ "${{ inputs.ksu_variant }}" == "BakaSU" ]; then
             if [[ "${{ inputs.use_kpm }}" == enabled* ]] || [[ "${{ inputs.use_kpm }}" == patched* ]]; then
               if grep -RqsE '^[[:space:]]*config[[:space:]]+KPM([[:space:]]|$)' common KernelSU 2>/dev/null; then
                 echo "CONFIG_KPM=y" >> "$DEFCONFIG"
@@ -1312,6 +1329,15 @@ jobs:
                 echo "错误: 已请求启用 KPM，但当前 KernelSU 代码未声明 CONFIG_KPM" >&2
                 exit 1
               fi
+            fi
+          elif [ "${{ inputs.ksu_variant }}" == "FinaSU" ]; then
+            if [[ "${{ inputs.use_kpm }}" == enabled* ]] || [[ "${{ inputs.use_kpm }}" == patched* ]]; then
+              echo "::warning title=KPM 不适用::FinaSU 不支持 KPM，已忽略该选项继续构建"
+              if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "> ⏭️ **KPM** 已忽略：FinaSU 变体不支持 KPM（构建未中断）" >> "$GITHUB_STEP_SUMMARY"
+              fi
+              echo "KPM_SKIPPED=true" >> "$GITHUB_ENV"
             fi
           fi
 
@@ -1362,7 +1388,7 @@ jobs:
             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
             sed -i '/kmi_symbol_list_strict_mode/d' ./common/BUILD.bazel
             rm -rf ./common/android/abi_gki_protected_exports_*
-            sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+            sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
           fi
 
           VERSION_INPUT=$(echo "${{ inputs.version }}" | tr -d '[:space:]')
@@ -1486,23 +1512,7 @@ jobs:
               sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' ./common/build.config.gki.aarch64
               sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' ./common/build.config.gki.aarch64
 
-              if [ "$BUILTIN_SOURCE" = "true" ]; then
-                cd common
-                grep -q "^CONFIG_LTO_NONE=y" arch/arm64/configs/gki_defconfig || echo "CONFIG_LTO_NONE=y" >> arch/arm64/configs/gki_defconfig
-                # A17 ABI 对齐：把本树 defconfig 与 Kokuban 发布内核的 94 项配置差异
-                # 强制对齐官方 OGKI 值（PID_NS/USER_NS/KSM/SQUASHFS/NF_TABLES/BBG LSM 等），
-                # 否则配置漂移 -> 大面积符号 CRC 变化 -> 厂商模块拒载不开机
-                cat "$GITHUB_WORKSPACE/kernel/sm8850/xuyi_abi_align.fragment" >> arch/arm64/configs/gki_defconfig
-                echo "pahole 版本: $(command -v pahole) $(pahole --version 2>&1)"
-                MAKEARGS="O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf STRIP=llvm-strip BINDGEN=bindgen PAHOLE=/usr/local/bin/pahole -j$(nproc --all)"
-                make $MAKEARGS gki_defconfig
-                # 「准备 Boot 镜像」需要 Image.lz4（mkbootimg --kernel Image.lz4）；
-                # 本树 arch/arm64/boot/Makefile:31 自带 Image.lz4 规则（内核版 lz4 帧格式），
-                # 显式点名目标即可，与 Kleaf 路径产出的 Image.lz4 一致。
-                make $MAKEARGS Image Image.lz4
-                strings out/arch/arm64/boot/Image | grep "Linux version"
-                lz4 -t out/arch/arm64/boot/Image.lz4
-              elif [ -f "build/build.sh" ]; then
+              if [ -f "build/build.sh" ]; then
                 LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC="/usr/bin/ccache clang" || exit 1
                 strings "out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image" | grep 'Linux version'
               else
@@ -1575,52 +1585,11 @@ jobs:
           retention-days: 7
           compression-level: 9
 
-      # ZRAM 补丁栈修复：设备的厂商模块（如 node_cache.ko）按官方 GKI 构建时的
-      # 符号 CRC 导入；本仓库 ZRAM 补丁栈（升级版 LZ4 + lz4k/lz4kd）改变 LZ4 头
-      # 文件上下文，genksyms 为 LZ4 导出符号生成新 CRC，模块加载被
-      # "disagrees about version of symbol" 拒载 → init 挂死 / 不开机
-      # （console-ramoops 实锤：Redmi K80/zorn 6.1.157 与 MTK dali 都是
-      # node_cache 的 LZ4_decompress_safe / LZ4_compress_default）。
-      # 触发条件用 use_zram 而不是 a17_compat：漂移来自 ZRAM 补丁栈，与目标系统
-      # 版本无关，A14/A15/A16 设备同样中招（K80 澎湃4/A14 就是这么漏掉的）。
-      # 修复 = v3 "lz4crc12" 方案：保持 MODVERSIONS 开启（vermagic 继续匹配），
-      # 构建后把 Image 中该分支导出的 LZ4 符号 __kcrctab 槽位改写为官方值
-      # （KMI 冻结，对该分支全部子版本有效）。官方表：6.1（android14-11，2 个
-      # 符号，取自 K80/zorn 原厂 boot.img）、6.6（android15-8，12 个）、
-      # 6.12（android16）。实测同 KMI 下 LZ4 函数 ABI 兼容，仅 CRC 值不同。
-      # 位置约束：必须在 编译内核 之后（Image 已生成）、KPM 补丁 之前。
-      - name: 还原 LZ4 符号官方 CRC（修复 ZRAM 补丁栈导致的厂商模块 CRC 拒载）
-        # 只在 ZRAM 补丁栈真正生效时执行：栈被跳过（缺资源/不兼容）时 zram 仍是
-        # 模块，lib/lz4 随之为模块，Image 里没有 LZ4 导出，无从还原（脚本会给出诊断）。
-        if: inputs.use_zram == true && env.ZRAM_SKIPPED != 'true'
-        run: |
-          case "${{ inputs.kernel_version }}" in
-            6.1|6.6|6.12) ;;
-            *)
-              echo "::warning title=CRC 还原跳过::内置官方 CRC 表仅覆盖 6.1（android14-11）、6.6（android15-8）与 6.12（android16 KMI）；${{ inputs.kernel_version }} 开启 ZRAM 时厂商模块可能仍因 CRC 不符拒载"
-              exit 0
-              ;;
-          esac
-          if [ "$BUILTIN_SOURCE" = "true" ]; then
-            TARGET_PATH="$KERNEL_ROOT/common/out/arch/arm64/boot"
-          elif [ "${{ inputs.android_version }}" == "android12" ] || [ "${{ inputs.android_version }}" == "android13" ]; then
-            TARGET_PATH="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist"
-          else
-            TARGET_PATH="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
-          fi
-          if [ ! -f "$TARGET_PATH/Image" ]; then
-            echo "::error::未找到 $TARGET_PATH/Image，无法执行 LZ4 CRC 还原"
-            exit 1
-          fi
-          python3 "$GITHUB_WORKSPACE/scripts/a17_crc_restore.py" "$TARGET_PATH/Image" "${{ inputs.kernel_version }}"
-
       - name: 应用 KPM 补丁（构建期修补 Image）
-        if: startsWith(inputs.use_kpm, 'patched') && (inputs.ksu_variant == 'SukiSU' || inputs.ksu_variant == 'BakaSU' || inputs.ksu_variant == 'ReSukiSU')
+        if: startsWith(inputs.use_kpm, 'patched') && (inputs.ksu_variant == 'SukiSU' || inputs.ksu_variant == 'BakaSU')
         run: |
           set -e
-          if [ "$BUILTIN_SOURCE" = "true" ]; then
-            TARGET_PATH="$KERNEL_ROOT/common/out/arch/arm64/boot"
-          elif [ "${{ inputs.android_version }}" == "android12" ] || [ "${{ inputs.android_version }}" == "android13" ]; then
+          if [ "${{ inputs.android_version }}" == "android12" ] || [ "${{ inputs.android_version }}" == "android13" ]; then
             TARGET_PATH="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist"
           else
             TARGET_PATH="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
@@ -1687,9 +1656,7 @@ jobs:
         run: |
           mkdir -p bootimgs
 
-          if [ "$BUILTIN_SOURCE" = "true" ]; then
-            SRC_DIR="$KERNEL_ROOT/common/out/arch/arm64/boot"
-          elif [ "${{ inputs.android_version }}" == "android12" ] || [ "${{ inputs.android_version }}" == "android13" ]; then
+          if [ "${{ inputs.android_version }}" == "android12" ] || [ "${{ inputs.android_version }}" == "android13" ]; then
             SRC_DIR="$KERNEL_ROOT/out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist"
           else
             SRC_DIR="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"

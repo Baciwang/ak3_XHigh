@@ -1,4 +1,3 @@
-# re-saved: register workflows on the standalone repo (Actions indexing quirk)
 name: Android 内核构建-自定义
 
 permissions:
@@ -64,9 +63,6 @@ on:
           - "237 (2025-06)"
           - "240 (2025-09)"
           - "246 (2025-12)"
-          - "252 (2026-04)"
-          - "257 (2026-07)"
-          - "269 (2026-10)"
           - "lts (5.10.272)"
       sub_level_5_15:
         description: "5.15 子版本 (选择后自动匹配安全补丁级别；仅内核版本为 5.15 时生效)"
@@ -110,9 +106,6 @@ on:
           - "185 (2025-07)"
           - "189 (2025-09)"
           - "194 (2025-12)"
-          - "197 (2026-03)"
-          - "206 (2026-06)"
-          - "211 (2026-09)"
           - "lts (5.15.220)"
       sub_level_6_1:
         description: "6.1 子版本 (选择后自动匹配安全补丁级别；仅内核版本为 6.1 时生效)"
@@ -204,7 +197,17 @@ on:
         options:
           - SukiSU
           - BakaSU
+          - FinaSU
         default: BakaSU
+
+      build_channel:
+        description: "构建通道（正式=官方 Release 发行版，最新=上游最新提交）"
+        required: false
+        type: choice
+        options:
+          - "正式 (Release)"
+          - "最新 (HEAD)"
+        default: "正式 (Release)"
 
       # ==================== 可选配置 ====================
       version:
@@ -282,13 +285,13 @@ on:
         required: true
         type: boolean
         default: false
-      skip_incompatible:
-        description: "功能不兼容或无法使用时自动跳过该功能（不中断构建）"
+      supp_op:
+        description: "启用 一加 骁龙8 Elite/Gen5 支持"
         required: false
         type: boolean
         default: false
-      a17_compat:
-        description: "启用 支持Android17系统"
+      skip_incompatible:
+        description: "功能不兼容或无法使用时自动跳过该功能（不中断构建）"
         required: false
         type: boolean
         default: false
@@ -398,7 +401,9 @@ jobs:
 
   build-custom-kernel:
     name: "${{ needs.resolve-version.outputs.kernel_full }}-${{ needs.resolve-version.outputs.android_version }}-${{ needs.resolve-version.outputs.os_patch_level }}"
-    needs: resolve-version
+    needs: [resolve-version, get-ksu-manager]
+    # 管理器拉取失败时不阻塞内核构建（ksuCommit 为空则内核跟随 main HEAD）
+    if: ${{ !cancelled() && needs.resolve-version.result == 'success' }}
     uses: ./.github/workflows/build.yml
     secrets: inherit
     with:
@@ -408,6 +413,12 @@ jobs:
       os_patch_level: ${{ needs.resolve-version.outputs.os_patch_level }}
       revision: "r1"
       ksu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
+      # 内核侧 KernelSU 检出到官方最新上传 Manager 构建的同一提交，
+      # 使内核 KSU 版本与拉取的管理器安装包严格一致（BakaSU / FinaSU 生效）
+      ksu_commit: ${{ needs.get-ksu-manager.outputs.ksuCommit }}
+      ksu_cert_size: ${{ needs.get-ksu-manager.outputs.managerCertSize }}
+      ksu_cert_hash: ${{ needs.get-ksu-manager.outputs.managerCertHash }}
       version: ${{ inputs.version || '' }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
@@ -416,15 +427,17 @@ jobs:
       use_kpm: ${{ inputs.use_kpm }}
       use_rekernel: ${{ inputs.use_rekernel || false }}
       cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
+      supp_op: ${{ inputs.supp_op || false }}
       enable_susfs: ${{ !inputs.cancel_susfs }}
       droidspaces: ${{ inputs.droidspaces || 'off' }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
       skip_incompatible: ${{ inputs.skip_incompatible || false }}
-      a17_compat: ${{ inputs.a17_compat }}
 
+  # 先拉取官方最新上传的 Manager 构建并输出其提交 SHA，供内核构建对齐
   get-ksu-manager:
     uses: ./.github/workflows/get-manager.yml
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}

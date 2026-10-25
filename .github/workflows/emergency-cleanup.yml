@@ -1,4 +1,3 @@
-# re-saved: register workflows on the standalone repo (Actions indexing quirk)
 name: Emergency Release Cleanup
 
 on:

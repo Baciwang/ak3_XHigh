@@ -1,4 +1,3 @@
-# re-saved: register workflows on the standalone repo (Actions indexing quirk)
 name: Update GKI Kernel Data
 
 on:
@@ -6,7 +5,7 @@ on:
     - cron: '0 8 */3 * *'  # 每 3 天 UTC 8:00
   workflow_dispatch:
   push:
-    branches: [dev]
+    branches: [main]
     paths:
       - 'data/**'
       - 'scripts/**'
@@ -60,6 +59,6 @@ jobs:
             echo "No data changes to commit."
           else
             git commit -m "chore: update GKI kernel version data"
-            git pull --rebase --autostash origin dev
+            git pull --rebase --autostash origin main
             git push
           fi

@@ -10,22 +10,17 @@ MODE="${2:-auto}"   # auto | bakasu | sukisu
 # 版本标识常量（base64 编码，避免明文暴露）
 declare -A PATTERNS
 PATTERNS[bakasu]=$(echo 'UkVQT19OQU1FIDo9IEJha2FTVQ==' | base64 -d | base64)
-PATTERNS[bakasu_legacy]=$(echo 'UkVQT19OQU1FIDo9IFJlU3VraVNV' | base64 -d | base64)
 PATTERNS[sukisu_branch]=$(echo 'QCQoY2FsbCBnaXRfYnJhbmNoKQ==' | base64 -d | base64)
+PATTERNS[finasu_branch]=$(echo 'QCQoS1NVX1ZFUlNJT05fQlJBTkNIKQ==' | base64 -d | base64)
 PATTERNS[marker]=$(echo 'QmFrYVNV' | base64 -d | base64)
-PATTERNS[marker_legacy]=$(echo 'UmVTdWtpU1U=' | base64 -d | base64)
-BRAND=$(echo 'eHV5aQ==' | base64 -d)
+PATTERNS[finasu_marker]=$(echo 'S1NVX1ZFUlNJT05fQlJBTkNI' | base64 -d | base64)
+BRAND=$(echo 'TGluZ0x1bw==' | base64 -d)
 
 apply_bakasu() {
   local kbuild="$KSU_DIR/kernel/Kbuild"
   if [ -f "$kbuild" ]; then
     local pat=$(echo "${PATTERNS[bakasu]}" | base64 -d)
-    local pat_legacy=$(echo "${PATTERNS[bakasu_legacy]}" | base64 -d)
-    # 上游改名后 Kbuild 为 REPO_NAME := BakaSU；固定到旧提交时仍是旧名，两种都匹配
-    sed -i -e "s/^${pat}\$/REPO_NAME := ${BRAND}/" -e "s/^${pat_legacy}\$/REPO_NAME := ${BRAND}/" "$kbuild"
-    if ! grep -q "^REPO_NAME := ${BRAND}\$" "$kbuild"; then
-      echo "::warning title=KSU 版本标识未改写::未在 kernel/Kbuild 中匹配到上游 REPO_NAME 行（上游布局可能已变化），产物版本名将保留上游标识"
-    fi
+    sed -i "s/^${pat}\$/REPO_NAME := ${BRAND}/" "$kbuild"
     git -C "$KSU_DIR" update-index --skip-worktree kernel/Kbuild
   fi
 }
@@ -43,25 +38,29 @@ apply_sukisu() {
   fi
 }
 
-detect_bakasu() {
+apply_finasu() {
+  # FinaSU kernel/Kbuild 以 git rev-parse --abbrev-ref HEAD 取分支名拼进
+  # KSU_VERSION_FULL（v<tag>-<sha>@<branch>）；CI 检出的是 detached 提交，
+  # 管理器「内核完整版本」因此显示 @HEAD。与 SukiSU 一致把使用点固定为
+  # @LingLuo；须在管理器证书注入（awk 重写 Kbuild）之后调用。
   local kbuild="$KSU_DIR/kernel/Kbuild"
-  [ -f "$kbuild" ] || return 1
-  local key
-  for key in bakasu bakasu_legacy marker marker_legacy; do
-    if grep -q "$(echo "${PATTERNS[$key]}" | base64 -d)" "$kbuild" 2>/dev/null; then
-      return 0
-    fi
-  done
-  return 1
+  if [ -f "$kbuild" ]; then
+    local pat=$(echo "${PATTERNS[finasu_branch]}" | base64 -d)
+    sed -i "s/${pat}/@${BRAND}/" "$kbuild"
+    git -C "$KSU_DIR" update-index --skip-worktree kernel/Kbuild
+  fi
 }
 
 case "$MODE" in
-  bakasu|resukisu) apply_bakasu ;;
+  bakasu)   apply_bakasu ;;
   sukisu)   apply_sukisu ;;
+  finasu)   apply_finasu ;;
   auto)
     # 自动检测：根据 KSU 目录内容判断变体
-    if detect_bakasu; then
+    if [ -f "$KSU_DIR/kernel/Kbuild" ] && grep -q "$(echo "${PATTERNS[marker]}" | base64 -d)" "$KSU_DIR/kernel/Kbuild" 2>/dev/null; then
       apply_bakasu
+    elif [ -f "$KSU_DIR/kernel/Kbuild" ] && grep -q "$(echo "${PATTERNS[finasu_marker]}" | base64 -d)" "$KSU_DIR/kernel/Kbuild" 2>/dev/null; then
+      apply_finasu
     else
       apply_sukisu
     fi

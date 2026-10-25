@@ -1,4 +1,3 @@
-# re-saved: register workflows on the standalone repo (Actions indexing quirk)
 # ========================================
 # GKI 内核构建主入口
 # ========================================
@@ -40,7 +39,16 @@ on:
         options:
           - SukiSU
           - BakaSU
+          - FinaSU
         default: BakaSU
+
+      build_channel:
+        description: "构建通道（正式=官方 Release 发行版，最新=上游最新提交）"
+        type: choice
+        options:
+          - "正式 (Release)"
+          - "最新 (HEAD)"
+        default: "正式 (Release)"
 
       # ==================== 可选配置 ====================
       version:
@@ -116,11 +124,6 @@ on:
         type: boolean
         default: false
 
-        a17_compat:
-          description: "启用 支持Android17系统"
-          type: boolean
-          default: false
-
       # ==================== 构建版本选择 ====================
       build_a12_5_10:
         description: "Android 12 - 5.10"
@@ -155,14 +158,21 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
 
   # ==================== Android 12 - 5.10 构建 ====================
   build-a12-5-10:
-    if: inputs.build_a12_5_10 || inputs.build_all
+    needs: [get-manager]
+    # 管理器拉取失败不阻塞构建（ksuCommit 为空则内核跟随 main HEAD）
+    if: ${{ !cancelled() && (inputs.build_a12_5_10 || inputs.build_all) }}
     uses: ./.github/workflows/kernel-a12-5-10.yml
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
+      ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
+      ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
+      ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
@@ -176,16 +186,21 @@ jobs:
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       skip_incompatible: ${{ inputs.skip_incompatible || false }}
-      a17_compat: ${{ inputs.a17_compat }}
       called_from_main: true
 
   # ==================== Android 13 - 5.15 构建 ====================
   build-a13-5-15:
-    if: inputs.build_a13_5_15 || inputs.build_all
+    needs: [get-manager]
+    # 管理器拉取失败不阻塞构建（ksuCommit 为空则内核跟随 main HEAD）
+    if: ${{ !cancelled() && (inputs.build_a13_5_15 || inputs.build_all) }}
     uses: ./.github/workflows/kernel-a13-5-15.yml
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
+      ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
+      ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
+      ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
@@ -199,16 +214,21 @@ jobs:
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       skip_incompatible: ${{ inputs.skip_incompatible || false }}
-      a17_compat: ${{ inputs.a17_compat }}
       called_from_main: true
 
   # ==================== Android 14 - 6.1 构建 ====================
   build-a14-6-1:
-    if: inputs.build_a14_6_1 || inputs.build_all
+    needs: [get-manager]
+    # 管理器拉取失败不阻塞构建（ksuCommit 为空则内核跟随 main HEAD）
+    if: ${{ !cancelled() && (inputs.build_a14_6_1 || inputs.build_all) }}
     uses: ./.github/workflows/kernel-a14-6-1.yml
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
+      ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
+      ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
+      ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
@@ -222,16 +242,21 @@ jobs:
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       skip_incompatible: ${{ inputs.skip_incompatible || false }}
-      a17_compat: ${{ inputs.a17_compat }}
       called_from_main: true
 
   # ==================== Android 15 - 6.6 构建 ====================
   build-a15-6-6:
-    if: inputs.build_a15_6_6 || inputs.build_all
+    needs: [get-manager]
+    # 管理器拉取失败不阻塞构建（ksuCommit 为空则内核跟随 main HEAD）
+    if: ${{ !cancelled() && (inputs.build_a15_6_6 || inputs.build_all) }}
     uses: ./.github/workflows/kernel-a15-6-6.yml
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
+      ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
+      ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
+      ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
@@ -245,16 +270,21 @@ jobs:
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       skip_incompatible: ${{ inputs.skip_incompatible || false }}
-      a17_compat: ${{ inputs.a17_compat }}
       called_from_main: true
 
   # ==================== Android 16 - 6.12 构建 ====================
   build-a16-6-12:
-    if: inputs.build_a16_6_12 || inputs.build_all
+    needs: [get-manager]
+    # 管理器拉取失败不阻塞构建（ksuCommit 为空则内核跟随 main HEAD）
+    if: ${{ !cancelled() && (inputs.build_a16_6_12 || inputs.build_all) }}
     uses: ./.github/workflows/kernel-a16-6-12.yml
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
+      ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
+      ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
+      ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
@@ -268,7 +298,6 @@ jobs:
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync }}
       skip_incompatible: ${{ inputs.skip_incompatible || false }}
-      a17_compat: ${{ inputs.a17_compat }}
       called_from_main: true
 
   # ==================== 收集补丁冲突文件 ====================
@@ -420,12 +449,17 @@ jobs:
           # KSU 显示名称
           case "${{ inputs.kernelsu_variant }}" in
             "SukiSU")    KSU_NAME="SukiSU" ;;
-            "BakaSU"|"ReSukiSU")  KSU_NAME="BakaSU" ;;
+            "BakaSU")  KSU_NAME="BakaSU" ;;
+            "FinaSU")  KSU_NAME="FinaSU" ;;
           esac
           echo "KSU_NAME=$KSU_NAME" >> $GITHUB_ENV
 
-          # 版本信息
-          KSU_VER="${{ needs.get-manager.outputs.ksuVer }}"
+          # 版本信息（内核侧已对齐官方上传构建时，实际内核 KSU 版本 = managerVer，
+          # managerVer 为空（管理器拉取失败）时回退 ksuVer）
+          KSU_VER="${{ needs.get-manager.outputs.managerVer }}"
+          if [ -z "$KSU_VER" ]; then
+            KSU_VER="${{ needs.get-manager.outputs.ksuVer }}"
+          fi
           SUS_VER="${{ needs.get-manager.outputs.susVer }}"
           echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
           echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
@@ -436,18 +470,22 @@ jobs:
           echo "NET_ENHANCE_STATUS=${{ inputs.use_net_enhance && '开启' || '未开启' }}" >> $GITHUB_ENV
           echo "REKERNEL_STATUS=${{ inputs.use_rekernel && '开启' || '未开启' }}" >> $GITHUB_ENV
           if [[ "${{ inputs.use_kpm }}" == enabled* ]]; then
-            echo "KPM_STATUS=开启" >> $GITHUB_ENV
+            echo "KPM_STATUS=开启（未修补）" >> $GITHUB_ENV
           elif [[ "${{ inputs.use_kpm }}" == patched* ]]; then
-            echo "KPM_STATUS=开启（构建期修补）" >> $GITHUB_ENV
+            echo "KPM_STATUS=开启（构建时修补）" >> $GITHUB_ENV
           else
             echo "KPM_STATUS=未开启" >> $GITHUB_ENV
           fi
 
-          # Hook 类型（SukiSU / BakaSU 均为 SUSFS Inline Hooks）
+          # Hook 类型（SukiSU / BakaSU / FinaSU 的 SUSFS 集成均为 fs 内联钩子）
           echo "HOOK_TYPE=SUSFS Inline Hooks" >> $GITHUB_ENV
 
-          # Mount 类型
-          echo "MOUNT_TYPE=Magic Mount" >> $GITHUB_ENV
+          # Mount 类型（FinaSU 使用 metamodule 模块架构）
+          if [ "${{ inputs.kernelsu_variant }}" == "FinaSU" ]; then
+            echo "MOUNT_TYPE=Metamodule" >> $GITHUB_ENV
+          else
+            echo "MOUNT_TYPE=Magic Mount" >> $GITHUB_ENV
+          fi
 
           # 发布标题
           echo "RELEASE_NAME=GKI Kernel: ${KSU_NAME} ${KSU_VER} + SUSFS ${SUS_VER}" >> $GITHUB_ENV
@@ -489,11 +527,15 @@ jobs:
                 BRANCH="builtin"
               fi
               ;;
-            "BakaSU"|"ReSukiSU") BRANCH="main" ;;
+            "BakaSU") BRANCH="main" ;;
+            "FinaSU") BRANCH="master" ;;
             *) echo "错误: 未知变体" >&2; exit 1 ;;
           esac
           echo "KSU_BRANCH=$BRANCH" >> $GITHUB_ENV
           echo "BRANCH_INFO=$BRANCH" >> $GITHUB_ENV
+          # 正式通道选用的 Release 标签（最新通道为空）
+          echo "CHANNEL_TAG=${{ needs.get-manager.outputs.channelTag }}" >> $GITHUB_ENV
+          echo "CHANNEL_NAME=${{ inputs.build_channel }}" >> $GITHUB_ENV
 
       # ==================== 获取 KernelSU 提交信息 ====================
       # 获取当前使用的 KernelSU 版本的 Git 提交信息
@@ -501,7 +543,8 @@ jobs:
         run: |
           case "${{ inputs.kernelsu_variant }}" in
             "SukiSU") REPO_URL="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"; REPO_URL2="SukiSU-Ultra/SukiSU-Ultra" ;;
-            "BakaSU"|"ReSukiSU") REPO_URL="https://github.com/Baka-SU/BakaSU.git"; REPO_URL2="Baka-SU/BakaSU" ;;
+            "BakaSU") REPO_URL="https://github.com/Baka-SU/BakaSU.git"; REPO_URL2="Baka-SU/BakaSU" ;;
+            "FinaSU") REPO_URL="https://github.com/LyraVoid/FinaSU.git"; REPO_URL2="LyraVoid/FinaSU" ;;
           esac
 
           if [ "${{ inputs.kernelsu_variant }}" = "SukiSU" ] && [ -f "config/config" ]; then
@@ -511,6 +554,19 @@ jobs:
               KSU_REF="$CUSTOM_COMMIT"
               KSU_URL="https://github.com/$REPO_URL2/commit/$CUSTOM_COMMIT"
               echo "BRANCH_INFO=custom" >> $GITHUB_ENV
+            fi
+          fi
+
+          if [ -z "${KSU_REF:-}" ] && [ -n "${CHANNEL_TAG:-}" ]; then
+            # 正式通道：取 Release 标签指向的提交（annotated tag 优先解引用）
+            COMMIT_HASH=$(git ls-remote $REPO_URL "refs/tags/${CHANNEL_TAG}^{}" | awk '{ print $1 }')
+            if [ -z "$COMMIT_HASH" ]; then
+              COMMIT_HASH=$(git ls-remote $REPO_URL "refs/tags/${CHANNEL_TAG}" | awk '{ print $1 }')
+            fi
+            if [ -n "$COMMIT_HASH" ]; then
+              KSU_REF=$COMMIT_HASH
+              KSU_URL="https://github.com/$REPO_URL2/releases/tag/$CHANNEL_TAG"
+              echo "BRANCH_INFO=release/${CHANNEL_TAG}" >> $GITHUB_ENV
             fi
           fi
 
@@ -551,11 +607,6 @@ jobs:
       - name: 生成发布说明
         run: |
           BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
-          if [ "${{ inputs.a17_compat }}" != "false" ]; then
-            A17_NOTE="> 本包适配 Android 17 系统版本（已将 LZ4 符号 CRC 还原为官方 OGKI 值，修复 HyperOS4 厂商模块 CRC 校验拒载导致的不开机）：仅 Android 17 系统可正常刷入；设备当前内核须与包同版本系（如 5.10.x ↔ 5.10.x）。"
-          else
-            A17_NOTE="> 本包面向 Android 12-16 系统版本：仅 Android 12/13/14/15/16 系统可正常刷入；设备当前内核须与包同版本系（如 5.10.x ↔ 5.10.x）。"
-          fi
           if [[ "$KSU_REF" =~ ^[0-9a-f]{40}$ ]]; then
             KSU_DISPLAY_REF="${KSU_REF:0:7}"
           else
@@ -606,6 +657,7 @@ jobs:
           | 项目 | 内容 |
           |:---|:---|
           | 发布类型 | ${{ inputs.release_type }} |
+          | 构建通道 | $CHANNEL_NAME |
           | 发布时间 | $BUILD_DATE |
           | 构建范围 | $build_targets |
 
@@ -638,7 +690,6 @@ jobs:
 
           > [!IMPORTANT]
           > 刷入前请备份原厂 Boot 镜像。
-          $A17_NOTE
           > 如果设备无法启动，请先恢复原厂镜像，再提取 KernelSU 日志进行反馈。
 
           <details>
