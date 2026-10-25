@@ -870,3 +870,40 @@ ksu_cond_balance_scan() {
   fi
 }
 ksu_cond_balance_scan
+
+
+# ---- SUSFS 的 susfs_def.h 少了 struct kstatfs 前向声明（2026-10-24 的新代码）----
+# 该版 susfs_def.h 里出现
+#   extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *, struct kstatfs *, bool *);
+# 但它既没包含 linux/statfs.h、也没前向声明 struct kstatfs ⇒ clang 报
+#   error: declaration of 'struct kstatfs' will not be visible outside of this function
+#   [-Werror,-Wvisibility]
+# 6.6 的 clang 把这个警告当错误，于是 setuid_hook.o 编不过。就地补一行前向声明；
+# 已经有声明、或没有该用法时自动跳过，幂等。
+susfs_def_kstatfs_fwd_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/include/linux/susfs_def.h" \
+              "$KERNEL_ROOT/KernelSU/kernel/include/linux/susfs_def.h"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ]; then
+    echo "SUSFS susfs_def.h 兼容：未找到 susfs_def.h，跳过"
+    return 0
+  fi
+  if ! grep -q 'struct kstatfs \*' "$f"; then
+    echo "SUSFS susfs_def.h 兼容：没有 struct kstatfs 用法，跳过"
+    return 0
+  fi
+  if grep -qE '^[[:space:]]*struct kstatfs;' "$f"; then
+    echo "SUSFS susfs_def.h 兼容：struct kstatfs 前向声明已在，跳过"
+    return 0
+  fi
+  echo "SUSFS susfs_def.h 兼容：补 struct kstatfs 前向声明"
+  perl -i -pe 'if (!$d && /struct kstatfs \*/) { $_ = "struct kstatfs;\n" . $_; $d = 1 }' "$f"
+  if ! grep -qE '^struct kstatfs;' "$f"; then
+    echo "::error::补 struct kstatfs 前向声明失败（$f）" >&2
+    exit 1
+  fi
+  echo "SUSFS susfs_def.h 兼容：已补上"
+}
+susfs_def_kstatfs_fwd_compat
