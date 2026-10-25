@@ -93,6 +93,10 @@ on:
         default: "仅上传 AnyKernel3.zip"
 
       # ==================== 功能开关 ====================
+      a17_compat:
+        required: false
+        type: boolean
+        default: false
       use_zram:
         description: "启用 ZRAM 压缩算法"
         type: boolean
@@ -176,6 +180,9 @@ jobs:
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
+
+      a17_compat: ${{ inputs.a17_compat }}
+
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
       use_kpm: ${{ inputs.use_kpm }}
@@ -204,6 +211,9 @@ jobs:
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
+
+      a17_compat: ${{ inputs.a17_compat }}
+
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
       use_kpm: ${{ inputs.use_kpm }}
@@ -232,6 +242,9 @@ jobs:
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
+
+      a17_compat: ${{ inputs.a17_compat }}
+
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
       use_kpm: ${{ inputs.use_kpm }}
@@ -260,6 +273,9 @@ jobs:
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
+
+      a17_compat: ${{ inputs.a17_compat }}
+
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
       use_kpm: ${{ inputs.use_kpm }}
@@ -288,6 +304,9 @@ jobs:
       version: ${{ inputs.version }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
+
+      a17_compat: ${{ inputs.a17_compat }}
+
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
       use_kpm: ${{ inputs.use_kpm }}

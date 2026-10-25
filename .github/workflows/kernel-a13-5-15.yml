@@ -65,6 +65,10 @@ on:
         required: false
         type: boolean
         default: false
+      a17_compat:
+        required: false
+        type: boolean
+        default: false
       use_zram:
         description: "启用 ZRAM 压缩算法"
         required: true
@@ -117,6 +121,10 @@ on:
         required: false
         type: string
         default: ""
+      a17_compat:
+        required: false
+        type: boolean
+        default: false
       use_zram:
         required: true
         type: boolean
@@ -247,6 +255,9 @@ jobs:
       version: ${{ inputs.version || '' }}
       build_time: ${{ inputs.build_time || '' }}
       use_zram: ${{ inputs.use_zram }}
+
+      a17_compat: ${{ inputs.a17_compat }}
+
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
       use_kpm: ${{ inputs.use_kpm }}
