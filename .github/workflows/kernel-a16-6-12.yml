@@ -64,6 +64,7 @@ on:
         type: boolean
         default: false
       a17_compat:
+        description: "支持 android17系统"
         required: false
         type: boolean
         default: false
@@ -120,6 +121,7 @@ on:
         type: string
         default: ""
       a17_compat:
+        description: "支持 android17系统"
         required: false
         type: boolean
         default: false
