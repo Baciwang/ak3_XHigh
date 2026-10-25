@@ -7,8 +7,6 @@
 # 调用前必须将工作目录设为 $KERNEL_ROOT
 set -eo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 echo "应用 SUSFS 补丁..."
 
 SUSFS_PATCH="50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch"
@@ -16,66 +14,9 @@ cp "$SUSFS4KSU/kernel_patches/$SUSFS_PATCH" ./common/
 cp "$SUSFS4KSU"/kernel_patches/fs/* ./common/fs/
 cp "$SUSFS4KSU"/kernel_patches/include/linux/* ./common/include/linux/
 
-# FinaSU 上游自 cdf8711a + 5b83330b（2026-10-23）起树内原生集成 SUSFS，官方
-# docs/builtin-integration.md 明确要求**不要**应用 susfs4ksu 的
-# 10_enable_susfs_for_ksu.patch（该补丁面向上游 KernelSU 手动钩子模型，会把
-# hook/tp_marker.o 等编译单元移出 Kbuild，而 FinaSU 的 kprobe 模型仍引用这些
-# 符号，驱动侧一旦打补丁就会在 vmlinux 链接阶段报 undefined symbol）。
-# 至此 FinaSU 与 SukiSU/BakaSU 形态一致：驱动侧不打补丁；差异仅在于 FinaSU
-# 的原生集成较新，这里顺带校验其结构（内核侧 50_add 主补丁的内联钩子依赖
-# 这些入口点/符号），漂移时立即报错而不是静默退化。
-verify_finasu_native_susfs() {
-  local FINASU_KSU="$KERNEL_ROOT/KernelSU/kernel"
-  local OPT SYM
-
-  if [ ! -f "$FINASU_KSU/extension/susfs.c" ]; then
-    echo "::error::FinaSU 未包含原生 SUSFS 集成（缺少 KernelSU/kernel/extension/susfs.c）。" >&2
-    echo "::error::当前检出的 FinaSU 早于 5b83330b（2026-10-23），或上游结构再次变化；" >&2
-    echo "::error::旧的 10_enable 驱动侧补丁方案已随上游原生集成废弃，请确认 ksuCommit 指向最新 Release。" >&2
-    exit 1
-  fi
-
-  # Kconfig 自带完整 KSU_SUSFS 菜单（「添加 SUSFS 配置」写入的 CONFIG_KSU_SUSFS*
-  # 必须全部有对应定义，否则 olddefconfig 会静默丢弃）
-  for OPT in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
-             KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-             KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
-    grep -q "^config $OPT\$" "$FINASU_KSU/Kconfig" \
-      || { echo "::error::FinaSU Kconfig 缺少 config $OPT（上游结构可能已变化）" >&2; exit 1; }
-  done
-
-  # extension/susfs.c 提供 50_add 主补丁在 fs/exec.c 内联调用的全部入口点；
-  # ksu_susfs_hooks.py 靠源码探测这些符号，缺失时会静默退化，这里提前校验
-  for SYM in ksu_handle_execveat ksu_handle_execveat_sucompat ksu_handle_post_execveat_sucompat \
-             ksu_setup_preinit_file ksu_preinit_handle_post_execveat; do
-    grep -qE "^(int|void) $SYM\(" "$FINASU_KSU/extension/susfs.c" \
-      || { echo "::error::FinaSU extension/susfs.c 缺少全局入口点: $SYM" >&2; exit 1; }
-  done
-
-  # 三参数 SUSFS 实现（内核侧 kernel/sys.c 的 3 参调用依赖该签名）
-  grep -q '^int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)$' "$FINASU_KSU/hook/setuid_hook.c" \
-    || { echo "::error::FinaSU setuid_hook.c 缺少三参数 ksu_handle_setresuid（上游结构可能已变化）" >&2; exit 1; }
-
-  # my_* 符号已全局导出（6.6/6.12 主补丁在 security/selinux/{hooks,selinuxfs}.c 内联调用）
-  for SYM in my_write_context my_write_access my_setprocattr; do
-    grep -qE "^(ssize_t|int) $SYM\(" "$FINASU_KSU/feature/selinux_hide.c" \
-      || { echo "::error::FinaSU selinux_hide.c 未全局导出 $SYM（SUSFS 内联 SELinux 钩子将无法链接）" >&2; exit 1; }
-  done
-
-  # susfs_init() 由驱动 init 原生调用
-  grep -q 'susfs_init();' "$FINASU_KSU/core/init.c" \
-    || { echo "::error::FinaSU init.c 未调用 susfs_init()（上游结构可能已变化）" >&2; exit 1; }
-
-  echo "FinaSU 原生 SUSFS 集成校验通过"
-}
-
 case "$KSU_VARIANT" in
-  "SukiSU"|"BakaSU")
+  "SukiSU"|"BakaSU"|"ReSukiSU")
     echo "SukiSU/BakaSU 使用内置 SUSFS 支持"
-    ;;
-  "FinaSU")
-    echo "FinaSU 使用树内原生 SUSFS 集成（驱动侧不打补丁，形态同 SukiSU/BakaSU）"
-    verify_finasu_native_susfs
     ;;
 esac
 
@@ -91,6 +32,54 @@ if grep -qF 'VMA_PAD_START(vma)' "$SUSFS_PATCH" \
   echo "目标内核未提供 VMA_PAD_START，使用 vma->vm_end 兼容 SUSFS OPEN_REDIRECT"
   sed -i 's/VMA_PAD_START(vma)/vma->vm_end/g' "$SUSFS_PATCH"
 fi
+
+# ---- 补丁的 fs/namespace.c 第一个 hunk 要求一行目标内核没有的 include ----
+# 2026-10-19 起 SUSFS 把 `#include <trace/hooks/blk.h>` 当 fs/namespace.c 第一个
+# hunk 的上下文行（要求存在）。6.1.157 的源里有这一行、树里也有该头文件；而
+# 6.1.57 这类旧子版本**连 include/trace/hooks/blk.h 这个文件都没有**（已实测
+# android14-6.1-2024-01_r24 为 404）—— 没法"给内核补上 include"，只能让它别要求。
+# 不做的话该 hunk 整个被拒：susfs_def.h、CL_COPY_MNT_NS 和那几个 extern 全丢，
+# 编译报一堆 use of undeclared identifier，而报错点还落在 namespace.c 的**使用处**，
+# 看着像 namespace.c 坏了（真因在补丁与内核的头文件差）。
+# 只按内容判断：补丁里有这行、且目标树没有该头文件，才动手；目标树有该头文件
+# （＝那行本来就在）时补丁一个字不动，幂等。
+susfs_patch_drop_blk_h_context() {
+  if ! grep -qF ' #include <trace/hooks/blk.h>' "$SUSFS_PATCH"; then
+    echo "SUSFS 补丁不含 trace/hooks/blk.h 上下文行，跳过"
+    return 0
+  fi
+  if [ -f ./include/trace/hooks/blk.h ]; then
+    echo "目标内核已有 include/trace/hooks/blk.h，补丁上下文可用，保留不动"
+    return 0
+  fi
+  echo "目标内核无 include/trace/hooks/blk.h：从 SUSFS 补丁去掉该上下文行并修正 hunk 行数"
+  # 删掉那行上下文后，该 hunk 头部的两侧行数要各减 1，否则 patch 认为补丁畸形。
+  # 只改「包含该行的那一个 hunk」，其余 hunk 不动。
+  perl -0777 -i -pe '
+    my @L = split /(?<=\n)/, $_;
+    my ($hdr, @n);
+    for my $i (0 .. $#L) {
+      if ($L[$i] =~ /^\@\@ /) {
+        if ($L[$i] =~ /^\@\@ -(\d+),(\d+) \+(\d+),(\d+) \@\@/) { $hdr = $i; @n = ($1, $2, $3, $4); }
+        else { $hdr = undef; }
+        next;
+      }
+      next unless $L[$i] eq " #include <trace/hooks/blk.h>\n";
+      die "blk.h 上下文行不在任何 hunk 内\n" unless defined $hdr;
+      (my $tail = $L[$hdr]) =~ s/^\@\@ -\d+,\d+ \+\d+,\d+ \@\@//;
+      $L[$hdr] = sprintf("\@\@ -%d,%d +%d,%d \@\@%s", $n[0], $n[1] - 1, $n[2], $n[3] - 1, $tail);
+      splice @L, $i, 1;
+      last;
+    }
+    $_ = join "", @L;
+  ' "$SUSFS_PATCH" || { echo "::error::从 SUSFS 补丁去掉 blk.h 上下文行失败" >&2; exit 1; }
+  if grep -qF ' #include <trace/hooks/blk.h>' "$SUSFS_PATCH"; then
+    echo "::error::SUSFS 补丁里仍残留 blk.h 上下文行" >&2
+    exit 1
+  fi
+  echo "SUSFS 补丁：blk.h 上下文行已去掉（hunk 行数同步修正）"
+}
+susfs_patch_drop_blk_h_context
 
 adjust_legacy_fdinfo_context() {
   sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
@@ -127,10 +116,18 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
     fi
     adjust_legacy_fdinfo_context
   fi
-  # 5.15.220(LTS) 原生含 #include <trace/hooks/{mm,blk}.h>。上游 rebase 后
-  # 主补丁已把这两行当作 susfs_def.h 插入 hunk 的上下文，旧版「先删后补」的
-  # 临时调整反而会让 hunk 整段被拒，故不再删除；缺失上下文的版本由
-  # normalize_trace_ctx.py 归一化补丁副本处理。
+  if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
+    echo "临时调整 Android 13 5.15 LTS 头文件上下文"
+    # 只有当补丁不要求这行时才删：2026-10-19 起补丁把 `#include <trace/hooks/blk.h>`
+    # 当 namespace.c hunk 的上下文行（要求存在），删掉会让 hunk 失配。
+    if grep -q '^ #include <trace/hooks/blk\.h>' "$SUSFS_PATCH"; then
+      echo "SUSFS 补丁要求保留 namespace.c 的 trace/hooks/blk.h，跳过该临时调整"
+    else
+      sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+      LTS_BLK_H_DELETED=1
+    fi
+    sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
+  fi
 fi
 
 if [[ "$ANDROID_VERSION" == "android14" && "$KERNEL_VERSION" == "6.1" ]]; then
@@ -143,8 +140,15 @@ if [[ "$ANDROID_VERSION" == "android14" && "$KERNEL_VERSION" == "6.1" ]]; then
     sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
   fi
   if [[ "$CURRENT_SUB" -ge 157 ]]; then
-    echo "临时调整 Android 14 6.1 namespace.c 上下文"
-    sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+    # 只有当补丁不要求这个 include 时才删：2026-10-19 起的 SUSFS 补丁把
+    # `#include <trace/hooks/blk.h>` 当作 fs/namespace.c hunk 的上下文行
+    # （要求它存在），照旧删掉会让 hunk 失配 → 产生 fs/namespace.c.rej。
+    if grep -q '^ #include <trace/hooks/blk\.h>' "$SUSFS_PATCH"; then
+      echo "SUSFS 补丁要求保留 namespace.c 的 trace/hooks/blk.h，跳过该临时调整"
+    else
+      echo "临时调整 Android 14 6.1 namespace.c 上下文"
+      sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+    fi
   fi
 fi
 
@@ -159,70 +163,11 @@ if [[ "$ANDROID_VERSION" == "android15" && "$KERNEL_VERSION" == "6.6" ]]; then
   fi
 fi
 
-# 6.12 主补丁的 fs/exec.c 首个 hunk 以 `#include <linux/dma-buf.h>`（紧跟 ksm.h）
-# 作为插入 susfs_def.h 的上下文锚点。GKI 6.12.58+ 的 exec.c 原生就是这个形态，
-# 补丁可直接匹配；6.12.23~38 没有这行 dma-buf.h，hunk 会被整段拒绝，exec.c 因此
-# 缺少 susfs_def.h，do_execveat_common() 里的 susfs_is_current_proc_no_su()
-# 变成隐式声明，clang -Werror 直接中断编译。
-# 仅当源码缺少该上下文时改写补丁副本：丢掉这行陈旧上下文并重算 hunk 行数；
-# 源码本身不做任何增删（原「先删 dma-buf.h、事后补到文件头」的错位调整已移除）。
-normalize_exec_include_hunk() {
-  python3 - "$SUSFS_PATCH" <<'PYEOF'
-import re
-import sys
-
-path = sys.argv[1]
-src = open("fs/exec.c", encoding="utf-8", errors="surrogateescape").read()
-if "#include <linux/ksm.h>\n#include <linux/dma-buf.h>" in src:
-    print("fs/exec.c 原生含 dma-buf.h 锚点，主补丁可直接匹配，跳过归一化")
-    raise SystemExit(0)
-
-with open(path, encoding="utf-8", errors="surrogateescape") as f:
-    lines = f.read().splitlines()
-
-hdr = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
-out, i, dropped = [], 0, 0
-
-while i < len(lines):
-    line = lines[i]
-    m = hdr.match(line)
-    if not m:
-        out.append(line)
-        i += 1
-        continue
-
-    j = i + 1
-    body = []
-    while j < len(lines) and not lines[j].startswith(("@@", "diff --git")):
-        body.append(lines[j])
-        j += 1
-
-    # 只处理「插入 susfs_def.h 且以 dma-buf.h 为上下文」的那个 hunk
-    if any(l.strip() == "#include <linux/dma-buf.h>" for l in body) \
-            and any("susfs_def.h" in l for l in body):
-        kept = [l for l in body if l.strip() != "#include <linux/dma-buf.h>"]
-        dropped += len(body) - len(kept)
-        old = sum(1 for l in kept if l[:1] in (" ", "-"))
-        new = sum(1 for l in kept if l[:1] in (" ", "+"))
-        line = "@@ -%s,%d +%s,%d @@" % (m.group(1), old, m.group(3), new)
-        body = kept
-
-    out.append(line)
-    out.extend(body)
-    i = j
-
-if dropped:
-    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
-        f.write("\n".join(out) + "\n")
-    print("fs/exec.c 补丁上下文已归一化（移除 %d 行陈旧 dma-buf 上下文）" % dropped)
-else:
-    print("fs/exec.c 补丁上下文无需归一化")
-PYEOF
-}
-
 if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
-  echo "归一化 Android 16 6.12 主补丁的 fs/exec.c 头文件上下文"
-  normalize_exec_include_hunk
+  if [[ "$CURRENT_SUB" -ge 58 ]]; then
+    echo "临时调整 Android 16 6.12 exec.c 上下文"
+    sed -i '/^#include <linux\/dma-buf.h>$/d' fs/exec.c
+  fi
 fi
 
 # 新版内核在 super.c 的 internal.h 之后新增了 trace/hooks/fs.h，
@@ -237,273 +182,7 @@ if grep -q '^ static int thaw_super_locked' "$SUSFS_PATCH" \
   SUPER_FS_H_REMOVED=1
 fi
 
-# 上游 rebase 到 5.15.211 后，susfs_def.h 的插入 hunk 把 trace/hooks 头文件
-# 当成了上下文：5.15.74~194 源码没有这些行，hunk 会整段被拒，最终因
-# SUSFS_IS_INODE_* 隐式声明在 clang -Werror 处中断。按源码实际内容归一化补丁副本。
-echo "归一化 SUSFS 头文件上下文"
-python3 "$SCRIPT_DIR/normalize_trace_ctx.py" "$SUSFS_PATCH"
-
 patch -p1 < "$SUSFS_PATCH" || true
-
-# ==================== KernelSU 缺失的 SUSFS 内联钩子符号（6.6+/6.12 主补丁形态）====================
-# 6.6/6.12 主补丁在 security/selinux/{hooks,selinuxfs}.c 内联改写调用点，要求 KernelSU 侧
-# 以全局符号提供 my_setprocattr / my_write_context / my_write_access；并在 fs/exec.c 调用
-# ksu_setup_preinit_file / ksu_preinit_handle_post_execveat（受 KSU_NO_PREINIT 开关控制）。
-# SukiSU-Ultra（builtin 5ef32ad / main 31255c4）两者都不提供，KPM+SUSFS 的 6.12 构建在
-# vmlinux 链接阶段报：
-#   ld.lld: error: undefined symbol: my_setprocattr / my_write_context / my_write_access
-#   ld.lld: error: undefined symbol: ksu_setup_preinit_file / ksu_preinit_handle_post_execveat
-# 处理：按 KernelSU 实际能力裁剪（SELinux 包装函数回落到内核原生处理函数、preinit 走主补丁
-# 自带开关），保留 SUSFS 其余功能；KernelSU 上游补齐后脚本按内容检测自动跳过，幂等。
-echo "按 KernelSU 实际能力裁剪 SUSFS 内联钩子..."
-python3 "$SCRIPT_DIR/ksu_susfs_hooks.py" "$KERNEL_ROOT" \
-  || { echo "::error::SUSFS 内联钩子裁剪失败"; exit 1; }
-
-# ==================== FinaSU 新 selinux_hide 模型适配 ====================
-# 自 FinaSU v0.1.0-preview1 起，kernel/feature/selinux_hide.c 换成了 tiann 新形态：
-#   移除 fake_state；统一用 backup_sepolicy + security_context_to_sid_with_policy(..., &orig_sid_p, &orig_rc_p)（8 参）；
-#   且该函数内部已做“双策略 + 全局 sidtab 同步”（KernelSU #3877/#3873）。
-# 此形态下把 SUSFS 主补丁 <6.6 的 SELinux 代码也从 &fake_state 切到 backup_sepolicy + 8 参 _with_policy，
-# 并补上权限检查顺序（df03912f）；sidtab 同步由上游 _with_policy 内置，无需外部再移植。
-NEW_MODEL=0
-FINASU_SELINUX_HIDE="$KERNEL_ROOT/KernelSU/kernel/feature/selinux_hide.c"
-if [ -f "$FINASU_SELINUX_HIDE" ] && ! grep -q 'fake_state' "$FINASU_SELINUX_HIDE"; then
-  NEW_MODEL=1
-fi
-# 触发条件：
-#   <6.6（5.10/5.15/6.1）主补丁内联改 selinuxfs 调用点 / selinux_setprocattr，引用 &fake_state；
-#   >=6.6（6.6/6.12）主补丁用 backup_sepolicy + 内核侧自含的 my_security_context_to_sid，
-#   不引用 fake_state，无需本分支（条件里两个 grep 均不命中，自动跳过）。
-# <6.6 必须从 fake_state 切到 backup_sepolicy + 8 参 _with_policy，否则新形态 FinaSU 无
-# fake_state 定义会导致 ThinLTO 链接报 undefined symbol: fake_state。
-if [ "$NEW_MODEL" = 1 ] && [ -f security/selinux/selinuxfs.c ] \
-  && { grep -q 'static ssize_t my_write_context' security/selinux/selinuxfs.c \
-       || grep -q '&fake_state' security/selinux/selinuxfs.c; }; then
-  echo "检测到 FinaSU 新 selinux_hide 形态：SUSFS <6.6 的 SELinux 代码切换到 backup_sepolicy + 8 参 _with_policy"
-  python3 - <<'PYEOF'
-import re as _re, sys as _sys
-
-NEW_FS_EXTERNS = (
-    "extern struct selinux_policy *backup_sepolicy;\n"
-    "extern int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len, u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);\n"
-    "extern int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext, u32 *scontext_len);\n"
-    "extern void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass, struct av_decision *avd);\n"
-)
-NEW_HK_EXTERNS = (
-    "extern struct selinux_policy *backup_sepolicy;\n"
-    "extern int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len, u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);\n"
-)
-
-def _sub(path, name, old, new):
-    s = open(path, encoding="utf-8", errors="surrogateescape").read()
-    n = s.count(old)
-    if n != 1:
-        print("::warning::%s: %s count=%d (expect 1)" % (path, name, n))
-        return
-    open(path, "w", encoding="utf-8", errors="surrogateescape").write(s.replace(old, new, 1))
-    print("%s: %s OK" % (path, name))
-
-fs = "security/selinux/selinuxfs.c"
-_sub(fs, "extern", "extern struct selinux_state fake_state;\n", NEW_FS_EXTERNS)
-_sub(fs, "ctx", "security_context_to_sid(&fake_state, buf, size, &sid, GFP_KERNEL)",
-     "security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL)")
-_sub(fs, "sid2ctx", "security_sid_to_context(&fake_state, sid, &canon, &len)",
-     "security_sid_to_context_with_policy(backup_sepolicy, sid, &canon, &len)")
-_sub(fs, "scon", "security_context_str_to_sid(&fake_state, scon, &ssid, GFP_KERNEL)",
-     "security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL, NULL, NULL)")
-_sub(fs, "tcon", "security_context_str_to_sid(&fake_state, tcon, &tsid, GFP_KERNEL)",
-     "security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL, NULL, NULL)")
-_sub(fs, "av", "security_compute_av_user(&fake_state, ssid, tsid, tclass, &avd)",
-     "security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, &avd)")
-
-hk = "security/selinux/hooks.c"
-_sub(hk, "extern", "extern struct selinux_state fake_state;\n", NEW_HK_EXTERNS)
-
-# <6.6 形态：resolve(&fake_state, value) -> _with_policy(8 参)
-#   6.1 主补丁为多行 &sid；5.15 主补丁为单行 &tmp_sid。两种都归一化。
-_hs = open(hk, encoding="utf-8", errors="surrogateescape").read()
-_hs, _n = _re.subn(r"security_context_to_sid\(&fake_state, value, size,\s*\n\s*&sid, GFP_KERNEL\)",
-                   "security_context_to_sid_with_policy(backup_sepolicy, value, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL)", _hs)
-_hs, _n15 = _re.subn(r"security_context_to_sid\(&fake_state, value, size, &tmp_sid, GFP_KERNEL\)",
-                     "security_context_to_sid_with_policy(backup_sepolicy, value, size, &tmp_sid, SECSID_NULL, GFP_KERNEL, NULL, NULL)", _hs)
-print("%s: setprocattr.ctx <6.6=%d/%d" % (hk, _n, _n15))
-open(hk, "w", encoding="utf-8", errors="surrogateescape").write(_hs)
-
-# >=6.6 形态：把已有的 6 参 _with_policy 声明/调用补成 8 参（新模型签名）
-#   6.6 主补丁在 security/selinux/{hooks,selinuxfs}.c 里自带 6 参 extern 声明，
-#   只把调用补成 8 参会报 "too many arguments to function call, expected 6, have 8"。
-#   因此 extern 声明必须与调用一起改成 8 参（新 FinaSU 的定义是 8 参）。
-for _lab, _f in (("selinuxfs", fs), ("hooks", hk)):
-    _s = open(_f, encoding="utf-8", errors="surrogateescape").read()
-    # (?!, NULL, NULL) 保证幂等：<6.6 已由上文 _sub 切成 8 参的调用不再重复追加
-    _s, _n2 = _re.subn(r"(security_context_to_sid_with_policy\(backup_sepolicy,[^;]*?, GFP_KERNEL)\)(?!, NULL, NULL)", r"\1, NULL, NULL)", _s)
-    _s, _nd = _re.subn(r"(security_context_to_sid_with_policy\(struct selinux_policy \*policy, const char \*scontext, u32 scontext_len,\s*\n\s*u32 \*sid, u32 def_sid, gfp_t gfp_flags)\);", r"\1, u32 *orig_sid_p, int *orig_rc_p);", _s)
-    open(_f, "w", encoding="utf-8", errors="surrogateescape").write(_s)
-    print("%s: _with_policy 8-arg normalize=%d decl=%d" % (_lab, _n2, _nd))
-
-_hs = open(hk, encoding="utf-8", errors="surrogateescape").read()
-# 主补丁 setprocattr 两种形态：
-#   旧形态（~2026-08 前的主补丁）：定义 my_setprocattr，内含无条件 SETCURRENT avc_has_perm
-#     —— 需要 rm_early 移除 + seq 重排（df03912f）；
-#   现行形态（2026-10 起的主补丁）：内联改 selinux_setprocattr，用 should_check_current +
-#     fake_error 门控 —— 权限顺序天然满足 df03912f，且 fake 解析经上文 setprocattr.ctx
-#     转换后已走 8 参 _with_policy（sidtab 同步内置），rm_early/seq 无目标代码。
-if "should_check_current" in _hs and "fake_error = security_context_to_sid_with_policy(backup_sepolicy, value, size, &tmp_sid, SECSID_NULL, GFP_KERNEL, NULL, NULL)" in _hs:
-    print("%s: 主补丁为现行门控形态（should_check_current+fake_error），rm_early_setcurrent/seq 不适用，侧信道语义已覆盖" % hk)
-else:
-    # 去掉无条件 SETCURRENT 检查（df03912f）：覆盖 <6.6(&selinux_state) 与 >=6.6(无 state) 两种形态
-    _removed = False
-    for _rm in ("\terror = avc_has_perm(&selinux_state,\n\t\t\t\t     mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL);\n\n\tif (error)\n\t\treturn error;\n\n",
-                "\terror = avc_has_perm(mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL);\n\n\tif (error)\n\t\treturn error;\n\n"):
-        if _hs.count(_rm) == 1:
-            _hs = _hs.replace(_rm, "", 1)
-            _removed = True
-            print("%s: rm_early_setcurrent OK" % hk)
-            break
-    if not _removed:
-        print("::warning::%s: rm_early_setcurrent not matched" % hk)
-    # 仅在 backup 解析失败时才检查 SETCURRENT
-    _seq_done = False
-    for _old2, _new2, _lab in (
-        ("\t\terror = security_context_to_sid_with_policy(backup_sepolicy, value, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);\n\t\tif (error)\n\t\t\treturn error;\n",
-         "\t\terror = security_context_to_sid_with_policy(backup_sepolicy, value, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);\n\t\tif (error) {\n\t\t\tint perm_error = avc_has_perm(&selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n", "<6.6"),
-        ("\t\terror = security_context_to_sid_with_policy(backup_sepolicy, str, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);\n\t\tif (error)\n\t\t\treturn error;\n",
-         "\t\terror = security_context_to_sid_with_policy(backup_sepolicy, str, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);\n\t\tif (error) {\n\t\t\tint perm_error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n", ">=6.6")):
-        if _hs.count(_old2) == 1:
-            _hs = _hs.replace(_old2, _new2, 1)
-            _seq_done = True
-            print("%s: seq(%s) OK" % (hk, _lab))
-            break
-    if not _seq_done:
-        print("::warning::%s: seq not matched" % hk)
-open(hk, "w", encoding="utf-8", errors="surrogateescape").write(_hs)
-for _f in (fs, hk):
-    _s = open(_f, encoding="utf-8", errors="surrogateescape").read()
-    if "fake_state" in _s:
-        _sys.stderr.write("::error::%s 仍有 fake_state 残留\n" % _f)
-        _sys.exit(1)
-PYEOF
-  # 仅作信息输出；5.15 主补丁不含 perm_error（权限顺序重排只适配 my_write_context 形态），
-  # 这里 grep 可能无命中，必须 || true，否则 set -e 会中断整个补丁步骤。
-  grep -n 'backup_sepolicy' security/selinux/selinuxfs.c | head -3 || true
-  grep -n 'perm_error' security/selinux/hooks.c | head -3 || true
-fi
-
-# ==================== 移植 KernelSU 的 SELinux 隐藏侧信道修复（旧 fake_state 形态）====================
-# 仅当 SUSFS 主补丁为旧形态（定义 my_write_context/my_write_access/my_setprocattr）时适用。
-# 检测方把 /sys/fs/selinux/{context,access} 与 setprocattr 当 oracle：比对
-# 假策略(fake_state)与全局 selinux_state 的 SID、以及权限检查顺序，来识别隐藏。
-# SUSFS 主补丁实现的 my_write_context / my_write_access / my_setprocattr 缺这两点，
-# 这里按 KernelSU 的做法补齐：
-#   - sidtab 同步（KernelSU #3873）：用假策略解析后再同步进全局 sidtab，消除 SID 差异；
-#   - 权限检查顺序（KernelSU df03912f）：仅当 backup 解析失败时才做 SETCURRENT 检查。
-# 现行主补丁（2026-10 起）已不定义这三个函数：<6.6 的门控内联形态与 NEW_MODEL 分支的
-# 8 参 _with_policy 转换（sidtab 同步内置）已覆盖同等的侧信道修复，见下方 else 分支说明。
-if [ "${NEW_MODEL:-0}" != 1 ] && [ -f security/selinux/selinuxfs.c ] && grep -q 'static ssize_t my_write_context' security/selinux/selinuxfs.c \
-  && [ -f security/selinux/hooks.c ] && grep -q 'static int my_setprocattr' security/selinux/hooks.c; then
-  python3 - <<'PYEOF'
-import re
-
-def sed(path, name, pat, repl):
-    src = open(path, encoding="utf-8", errors="surrogateescape").read()
-    new, n = re.subn(pat, repl, src, count=1)
-    if n == 0:
-        print("::warning::%s: %s not matched (skip)" % (path, name))
-        return
-    open(path, "w", encoding="utf-8", errors="surrogateescape").write(new)
-    print("%s: %s OK" % (path, name))
-
-fs = "security/selinux/selinuxfs.c"
-# my_write_context（<6.6 用 fake_state；>=6.6 用 backup_sepolicy 的 _with_policy 解析）
-sed(fs, "ctx(<6.6)", r"(\tlength = security_context_to_sid\(&fake_state, buf, size, &sid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FINASU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(&selinux_state, buf, size, &tmp_sid, GFP_KERNEL);\n\t}\n")
-sed(fs, "ctx(>=6.6)", r"(\tlength = security_context_to_sid_with_policy\(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FINASU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(buf, size, &tmp_sid, GFP_KERNEL);\n\t}\n")
-# my_write_access scon / tcon
-sed(fs, "scon(<6.6)", r"(\tlength = security_context_str_to_sid\(&fake_state, scon, &ssid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FINASU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, scon, &tmp_sid, GFP_KERNEL);\n\t}\n")
-sed(fs, "scon(>=6.6)", r"(\tlength = security_context_to_sid_with_policy\(backup_sepolicy, scon, strlen\(scon\), &ssid, SECSID_NULL, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FINASU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(scon, strlen(scon), &tmp_sid, GFP_KERNEL);\n\t}\n")
-sed(fs, "tcon(<6.6)", r"(\tlength = security_context_str_to_sid\(&fake_state, tcon, &tsid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FINASU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, tcon, &tmp_sid, GFP_KERNEL);\n\t}\n")
-sed(fs, "tcon(>=6.6)", r"(\tlength = security_context_to_sid_with_policy\(backup_sepolicy, tcon, strlen\(tcon\), &tsid, SECSID_NULL, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FINASU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(tcon, strlen(tcon), &tmp_sid, GFP_KERNEL);\n\t}\n")
-
-hk = "security/selinux/hooks.c"
-# 去掉无条件 SETCURRENT 检查（<6.6 带 &selinux_state；>=6.6 不带）
-sed(hk, "rm_early(<6.6)", r"\terror = avc_has_perm\(&selinux_state,\n\t\t\t\t     mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL\);\n\n\tif \(error\)\n\t\treturn error;\n\n", "")
-sed(hk, "rm_early(>=6.6)", r"\terror = avc_has_perm\(mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL\);\n\n\tif \(error\)\n\t\treturn error;\n\n", "")
-# 仅在 backup 解析失败时才检查 SETCURRENT，并同步全局 sidtab
-sed(hk, "seq+sync(<6.6)", r"(\t\terror = security_context_to_sid\(&fake_state, value, size,\n\t\t\t\t\t\t&sid, GFP_KERNEL\);\n)\t\tif \(error\)\n\t\t\treturn error;\n",
-    "\\1\t\tif (error) {\n\t\t\t/* FINASU_SEQ: 仅当 backup 解析失败时才做 SETCURRENT 检查（KernelSU df03912f） */\n\t\t\tint perm_error = avc_has_perm(&selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n\t\t{\n\t\t\tu32 tmp_sid;\n\t\t\t/* FINASU_SIDTAB_SYNC (KernelSU #3873) */\n\t\t\tsecurity_context_to_sid(&selinux_state, value, size, &tmp_sid, GFP_KERNEL);\n\t\t}\n")
-sed(hk, "seq+sync(>=6.6)", r"(\t\terror = security_context_to_sid_with_policy\(backup_sepolicy, str, size, &sid, SECSID_NULL, GFP_KERNEL\);\n)\t\tif \(error\)\n\t\t\treturn error;\n",
-    "\\1\t\tif (error) {\n\t\t\t/* FINASU_SEQ: 仅当 backup 解析失败时才做 SETCURRENT 检查（KernelSU df03912f） */\n\t\t\tint perm_error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n\t\t{\n\t\t\tu32 tmp_sid;\n\t\t\t/* FINASU_SIDTAB_SYNC (KernelSU #3873) */\n\t\t\tsecurity_context_to_sid(str, size, &tmp_sid, GFP_KERNEL);\n\t\t}\n")
-PYEOF
-  # 仅作信息输出；旧形态模式部分失配时 grep 无命中，必须 || true，否则 pipefail 会中断整个补丁步骤
-  grep -n 'FINASU_SIDTAB_SYNC' security/selinux/selinuxfs.c | head || true
-  grep -n 'FINASU_SIDTAB_SYNC\|FINASU_SEQ' security/selinux/hooks.c | head || true
-else
-  # 主补丁形态判定：
-  #   旧形态定义 my_write_context/my_write_access/my_setprocattr，缺失即异常，保留告警；
-  #   现行形态（2026-10 起的主补丁）不再定义这三个函数：<6.6 内联改 selinux_setprocattr /
-  #   selinuxfs 调用点（should_check_current+fake_error 门控），>=6.6 用 backup_sepolicy +
-  #   my_security_context_to_sid（内核侧自含）。侧信道修复（sidtab 同步 #3873、权限顺序
-  #   df03912f）由 NEW_MODEL 分支的 8 参 _with_policy 转换与门控校验覆盖，无需旧形态移植。
-  if grep -qE 'static ssize_t my_write_(context|access)' security/selinux/selinuxfs.c 2>/dev/null \
-    || grep -q 'static int my_setprocattr' security/selinux/hooks.c 2>/dev/null; then
-    echo "::warning::未找到 SUSFS 的 my_write_context/my_setprocattr，跳过 SELinux 侧信道移植"
-  else
-    echo "SUSFS 主补丁为现行形态（无 my_write_context/my_setprocattr）：侧信道修复由门控校验与 8 参 _with_policy 内置同步覆盖，无需旧形态移植"
-  fi
-fi
-
-# ==================== SUSFS 路径隐藏回退（跨命名空间 / FUSE） ====================
-# susfs_add_sus_path（非 loop）在“调用方命名空间”里 kern_path 解析路径；管理器/ksud 常解析不到
-# /storage/emulated 这类 FUSE 路径（-ENOENT），于是规则加不进去、路径隐藏失效。
-# 这里加回退：解析失败时自动改走 LOOP 机制（内核 workqueue 在 init 命名空间稍后解析并打标记）。
-if [ -f fs/susfs.c ] && grep -qF 'void susfs_add_sus_path(void __user **user_info)' fs/susfs.c \
-  && ! grep -qF 'FINASU_SUS_PATH_LOOP_FALLBACK' fs/susfs.c; then
-  python3 - <<'PYEOF'
-p = "fs/susfs.c"
-s = open(p, encoding="utf-8", errors="surrogateescape").read()
-old1 = "void susfs_add_sus_path(void __user **user_info) {"
-new1 = "void susfs_add_sus_path_loop(void __user **user_info);\n" + old1
-if s.count(old1) != 1:
-    print("::warning::fs/susfs.c: susfs_add_sus_path 签名不是预期形态，跳过")
-else:
-    s = s.replace(old1, new1, 1)
-    old2 = ("\tif (copy_from_user(&info, (struct st_susfs_sus_path __user*)*user_info, sizeof(info))) {\n"
-            "\t\tinfo.err = -EFAULT;\n"
-            "\t\tgoto out_copy_to_user;\n"
-            "\t}\n\n"
-            "\tinfo.err = kern_path(info.target_pathname, LOOKUP_FOLLOW, &path);\n"
-            "\tif (info.err) {\n"
-            "\t\tSUSFS_LOGE(\"failed opening file '%s'\\n\", info.target_pathname);\n"
-            "\t\tgoto out_copy_to_user;\n"
-            "\t}\n")
-    new2 = ("\tif (copy_from_user(&info, (struct st_susfs_sus_path __user*)*user_info, sizeof(info))) {\n"
-            "\t\tinfo.err = -EFAULT;\n"
-            "\t\tgoto out_copy_to_user;\n"
-            "\t}\n\n"
-            "\tinfo.err = kern_path(info.target_pathname, LOOKUP_FOLLOW, &path);\n"
-            "\tif (info.err) {\n"
-            "\t\tSUSFS_LOGE(\"failed opening '%s' in current ns, fallback to sus_path_loop\\n\", info.target_pathname);\n"
-            "\t\t/* FINASU_SUS_PATH_LOOP_FALLBACK: 调用方命名空间解析不到（常见于 /storage/emulated 等 FUSE 路径）时，\n"
-            "\t\t   退回 LOOP 机制，交由内核 workqueue 在 init 命名空间稍后解析并重新打标记 */\n"
-            "\t\tsusfs_add_sus_path_loop(user_info);\n"
-            "\t\treturn;\n"
-            "\t}\n")
-    if s.count(old2) != 1:
-        print("::warning::fs/susfs.c: susfs_add_sus_path 代码形态不是预期，跳过回退")
-    else:
-        open(p, "w", encoding="utf-8", errors="surrogateescape").write(s.replace(old2, new2, 1))
-        print("fs/susfs.c: 已加 SUSFS 路径隐藏 LOOP 回退")
-PYEOF
-  grep -n 'FINASU_SUS_PATH_LOOP_FALLBACK' fs/susfs.c | head
-else
-  echo "::warning::未找到 fs/susfs.c 的 susfs_add_sus_path，跳过路径隐藏回退"
-fi
-
 
 # ---- 预期冲突处理：上游已包含同款修改的 .rej 剔除，真实缺失的手工补齐 ----
 
@@ -532,93 +211,45 @@ if [[ -f fs/proc/task_mmu.c.rej ]] \
       echo "::error::show_smap SUS_MAP 检查手工补丁失败，请人工核对 fs/proc/task_mmu.c"
       exit 1
     fi
+    rm -f fs/proc/task_mmu.c.rej
   fi
+fi
 
-  # 同一个文件在 6.12.69+ 还把 show_smaps_rollup 重写成 VMA_ITERATOR + for_each_vma
-  # （删掉了 out_unlock 分支），主补丁那两段 hunk 依赖旧上下文全部被拒；虽然不影响
-  # 编译，但 SUS_MAP 标记的 VMA 会经 /proc/<pid>/smaps_rollup 泄露。这里在 do 循环
-  # 入口整段跳过该 VMA，并同步 last_vma_end，语义与主补丁的 bypass_orig_flow 一致。
-  if grep -qF 'bypass_orig_flow' fs/proc/task_mmu.c.rej \
-    && ! sed -n '/^static int show_smaps_rollup(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
-      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
-    echo "为 show_smaps_rollup 手工补入 SUS_MAP 跳过逻辑（6.12.69+ 上下文漂移）"
-    python3 - <<'PYEOF'
-p = "fs/proc/task_mmu.c"
-s = open(p, encoding="utf-8", errors="surrogateescape").read()
-start = s.find("static int show_smaps_rollup(struct seq_file *m, void *v)")
-end = s.find("\n}\n", start)
-if start < 0 or end < 0:
-    print("::error::fs/proc/task_mmu.c: 未找到 show_smaps_rollup")
-    raise SystemExit(1)
-body = s[start:end]
-needle = "\tdo {\n\t\tsmap_gather_stats(vma, &mss, 0);\n"
-insert = (
-    "\tdo {\n"
-    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-    "\t\t/* SUS_MAP 标记的 VMA 整体跳过，避免 rollup 中泄露 */\n"
-    "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {\n"
-    "\t\t\tlast_vma_end = vma->vm_end;\n"
-    "\t\t\tcontinue;\n"
-    "\t\t}\n"
-    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-    "\t\tsmap_gather_stats(vma, &mss, 0);\n"
-)
-if "SUSFS_IS_INODE_SUS_MAP" in body:
-    print("show_smaps_rollup 已含 SUS_MAP 检查，跳过")
-elif body.count(needle) != 1:
-    print("::error::show_smaps_rollup 循环入口形态不是预期，跳过")
-    raise SystemExit(1)
-else:
-    s = s[:start] + body.replace(needle, insert, 1) + s[end:]
-    open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
-    print("show_smaps_rollup: 已补入 SUS_MAP 跳过逻辑")
-PYEOF
-    if ! sed -n '/^static int show_smaps_rollup(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
-      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
-      echo "::error::show_smaps_rollup SUS_MAP 跳过逻辑手工补丁失败，请人工核对 fs/proc/task_mmu.c"
-      exit 1
-    fi
+# 为尚未提供 SU 会话 FD 接口的 SukiSU/BakaSU 恢复旧版 exec hook 行为
+EXEC_HELPER=""
+if [[ "$KSU_VARIANT" == SukiSU* || "$KSU_VARIANT" == "BakaSU" || "$KSU_VARIANT" == "ReSukiSU" ]]; then
+  if grep -qF 'ksu_install_su_fd();' fs/exec.c; then
+    EXEC_HELPER="ksu_install_su_fd"
+  elif grep -qF 'ksu_handle_post_execveat_sucompat(' fs/exec.c; then
+    EXEC_HELPER="ksu_handle_post_execveat_sucompat"
   fi
-
-  # 拒绝内容已全部补齐，删除 .rej，避免继续污染 Rejects 产物
-  TASK_MMU_UNRESOLVED=0
-  if grep -qF 'bypass_orig_flow' fs/proc/task_mmu.c.rej \
-    && ! sed -n '/^static int show_smaps_rollup(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
-      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
-    TASK_MMU_UNRESOLVED=1
-  fi
-  if grep -qF 'static int show_smap(struct seq_file *m, void *v)' fs/proc/task_mmu.c.rej \
-    && ! sed -n '/^static int show_smap(struct seq_file \*m, void \*v)/,/^}/p' fs/proc/task_mmu.c \
-      | grep -qF 'SUSFS_IS_INODE_SUS_MAP'; then
-    TASK_MMU_UNRESOLVED=1
-  fi
-  if [[ "$TASK_MMU_UNRESOLVED" -eq 0 ]]; then
-    # 仅当拒绝内容全部落在已处理的两个函数上时才删除，避免掩盖新出现的漂移
-    UNKNOWN_HUNK="$(grep '^@@' fs/proc/task_mmu.c.rej | grep -vE 'show_smap|show_smaps_rollup' || true)"
-    if [[ -z "$UNKNOWN_HUNK" ]]; then
-      echo "fs/proc/task_mmu.c 拒绝内容已全部补齐，剔除 .rej"
-      rm -f fs/proc/task_mmu.c.rej
-    else
-      echo "::warning title=task_mmu 冲突::仍有未识别的 hunk，保留 .rej 供排查："
-      echo "$UNKNOWN_HUNK"
-    fi
+fi
+if [[ -n "$EXEC_HELPER" ]] \
+  && ! grep -RqsE --include='*.c' "^[[:space:]]*int[[:space:]]+${EXEC_HELPER}[[:space:]]*\(" "$KERNEL_ROOT/KernelSU/kernel"; then
+  echo "$KSU_VARIANT 尚未提供 $EXEC_HELPER，恢复旧版 exec hook"
+  sed -i '/^extern int ksu_install_su_fd(void);$/d' fs/exec.c
+  sed -i '/^extern int ksu_handle_post_execveat_sucompat(/,+1d' fs/exec.c
+  sed -i 's/is_su_session = !\(ksu_handle_execveat[^;]*;\)/\1/' fs/exec.c
+  sed -i '/^[[:space:]]*bool is_su_session = false;$/d' fs/exec.c
+  sed -i '/^[[:space:]]*if (unlikely(is_su_session && retval >= 0))$/,+1d' fs/exec.c
+  sed -i '/^[[:space:]]*if (unlikely(is_su_session))$/,+1d' fs/exec.c
+  sed -i '/^#ifdef CONFIG_KSU_SUSFS$/N;/^#ifdef CONFIG_KSU_SUSFS\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS$/d' fs/exec.c
+  if grep -qE 'ksu_install_su_fd|ksu_handle_post_execveat_sucompat|is_su_session' fs/exec.c; then
+    echo "::error::$KSU_VARIANT exec hook 结构已变化，无法完成兼容修复"
+    exit 1
   fi
 fi
 
 # 上游 5.10 主补丁把 susfs_sus_kstat_spoof_vfs_statfs 的 extern 声明放在了
 # fs/statfs.c 的使用点之后（vfs_statfs 之前），clang -Werror 报隐式声明；
 # 声明属于 SUSFS 接口，直接补进公共头 include/linux/susfs_def.h：
-# 不依赖 statfs.c 内锚点与行号比较，声明重复合法，上游后续自行修复也不冲突。
-# 注意：FinaSU 的 setuid_hook.c / sucompat.c 会在仅有 <linux/types.h> 等基础
-# 头文件时就包含 susfs_def.h，此时 struct kstatfs 尚未声明，原型内引入新
-# struct 标签会触发 clang -Werror,-Wvisibility（上游内核构建日志实证），
-# 因此必须连同 struct 前置声明一起插入。
+# 不依赖 statfs.c 内锚点与行号比较，声明重复合法，上游后续自行修复也不冲突
 SUSFS_DEF_H="$KERNEL_ROOT/common/include/linux/susfs_def.h"
 if [[ -f fs/statfs.c ]] && grep -qF 'susfs_sus_kstat_spoof_vfs_statfs(' fs/statfs.c \
   && [[ -f "$SUSFS_DEF_H" ]] \
   && ! grep -qF 'susfs_sus_kstat_spoof_vfs_statfs(' "$SUSFS_DEF_H"; then
   echo "将 susfs_sus_kstat_spoof_vfs_statfs 声明补入 include/linux/susfs_def.h"
-  sed -i '/^#endif \/\/ #ifndef KSU_SUSFS_DEF_H$/i struct inode;\nstruct kstatfs;\nextern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);' "$SUSFS_DEF_H"
+  sed -i '/^#endif \/\/ #ifndef KSU_SUSFS_DEF_H$/i extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);' "$SUSFS_DEF_H"
 fi
 
 # 上游 susfs.c 直接调用 security_sb_statfs 却没有包含 linux/security.h，
@@ -659,7 +290,7 @@ if [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.15" ]]; then
   fi
   if [[ "$OS_PATCH_LEVEL" == "lts" ]]; then
     echo "还原 Android 13 5.15 LTS 头文件上下文"
-    if ! grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
+    if [ "${LTS_BLK_H_DELETED:-0}" = "1" ] && ! grep -qF '#include <trace/hooks/blk.h>' fs/namespace.c; then
       sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
     fi
     if ! grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c; then
@@ -690,6 +321,13 @@ if [[ "$ANDROID_VERSION" == "android15" && "$KERNEL_VERSION" == "6.6" ]]; then
   if [[ "$CURRENT_SUB" -le 57 ]]; then
     echo "还原 Android 15 6.6 memory.c 临时调整"
     sed -i '/^#include <linux\/zswap.h>$/d' mm/memory.c
+  fi
+fi
+
+if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
+  if [[ "$CURRENT_SUB" -ge 58 ]] && ! grep -qF '#include <linux/dma-buf.h>' fs/exec.c; then
+    echo "还原 Android 16 6.12 exec.c 临时调整"
+    sed -i '0,/^#include /s//#include <linux\/dma-buf.h>\n&/' fs/exec.c
   fi
 fi
 
@@ -765,14 +403,470 @@ if [[ "$ANDROID_VERSION" == "android16" && "$KERNEL_VERSION" == "6.12" ]]; then
     echo "已修复 setuid_hook.c 重复定义问题"
   fi
 fi
+###############################################################################
+# SELinux hide 兼容
+#
+# 历史：一度认为 SUSFS/KSU 的 selinux_hide 是「backup_sepolicy + 8 参
+# *_with_policy + 手动 hook(should_check_current)」的新形态，与旧内核源码组合会
+# 编译报错或运行时 panic，于是按内核版本分了两条硬阻断（<6.6 缺
+# should_check_current、>=6.6 缺 *_with_policy）。
+#
+# 这两条的前提已经作废：上游 SUSFS 在 2026-10-19 的 f6c046775「kernel &
+# KernelSU: Reuse upstream selinux_hide existing code」（其后 b57ed1998 同步官方
+# KernelSU）改成复用上游既有实现 —— 现补丁里 should_check_current 与
+# _with_policy 出现次数都是 0，KSU 源码也不再引用它们。再留着就会把 6.1/6.6
+# 的构建无理由拦下（症状＝「缺少 should_check_current」/「需要二改的
+# *_with_policy」两条 ::error）。
+#
+# 现在只保留仍然成立的一条：<6.6 时 KSU 侧若「引用了旧版 fake_state 却没有定义」
+# （同步上游时被一并删掉），就地补回定义；其余交给编译器判断。
+###############################################################################
+selinux_hide_compat() {
+  local ksu_dirs="$KERNEL_ROOT/common/drivers/kernelsu $KERNEL_ROOT/KernelSU"
+  local hide_file ge66=false
+  hide_file=$(grep -Rls 'ksu_selinux_hide_running' $ksu_dirs 2>/dev/null | head -n 1 || true)
+  if [ -z "$hide_file" ]; then
+    echo "SELinux hide 兼容：KSU 侧未启用 selinux_hide，跳过"
+    return 0
+  fi
+  echo "SELinux hide 兼容：KSU 侧实现 = ${hide_file#"$KERNEL_ROOT"/}"
 
-# 守护：主补丁若再次因上下文漂移漏掉 susfs_def.h，在这里给出可读错误，
-# 而不是等到编译 fs/proc/task_mmu.c 时才报一串 SUSFS_IS_INODE_* 隐式声明
-for SUSFS_SRC in fs/proc/task_mmu.c fs/namespace.c; do
-  [[ -f "$SUSFS_SRC" ]] || continue
-  if grep -qE 'SUSFS_IS_INODE_|CL_COPY_MNT_NS' "$SUSFS_SRC" \
-    && ! grep -qF '#include <linux/susfs_def.h>' "$SUSFS_SRC"; then
-    echo "::error::$SUSFS_SRC 使用了 SUSFS 宏但缺少 linux/susfs_def.h，主补丁 hunk 未应用"
+  if [ "$(printf '%s\n6.6\n' "$KERNEL_VERSION" | sort -V | head -n 1)" = "6.6" ]; then
+    ge66=true
+  fi
+
+  if [ "$ge66" = false ] \
+    && grep -q 'fake_state' "$hide_file" \
+    && ! grep -qE '^[[:space:]]*(static[[:space:]]+)?struct selinux_state[[:space:]]+fake_state' "$hide_file"; then
+    echo "SELinux hide 兼容：<6.6 缺少旧版 fake_state 定义，按上游思路就地补回"
+    awk 'NR==FNR { if ($0 ~ /^#include/) last=NR; next }
+         { print; if (FNR==last && !done) { print "static struct selinux_state fake_state;"; done=1 } }' \
+      "$hide_file" "$hide_file" > "$hide_file.tmp"
+    mv "$hide_file.tmp" "$hide_file"
+    if ! grep -qE '^static struct selinux_state fake_state;' "$hide_file"; then
+      echo "::error::补回 fake_state 定义失败（$hide_file）" >&2
+      exit 1
+    fi
+    echo "SELinux hide 兼容：已补回 static struct selinux_state fake_state;"
+  else
+    echo "SELinux hide 兼容：无需处理（$KERNEL_VERSION，fake_state 不适用或无需补回）"
+  fi
+}
+selinux_hide_compat
+
+# ---- 上游 BakaSU 的硬失败放行 ----
+# kernel/tools/susfs_compat.mk 末尾目前无条件写着
+#   $(info -- $(REPO_NAME): susfs has NOT update with latest KernelSU source)
+#   $(info -- $(REPO_NAME): Please wait simonpunk update)
+#   $(error Please wait susfs update.)
+# 于是所有构建都在等 simonpunk 更新 SUSFS 之前无法通过。按上游给出的修复思路自行放行：
+# 该文件上面的 KSU_COMPAT_* 宏仍按源码自动探测（不改动其判断），版本相关的兼容规则由
+# 上面的 selinux_hide_compat 负责（<6.6 缺 should_check_current 阻断、>=6.6 需二改
+# 的 *_with_policy、<6.6 补回旧版 fake_state），所以这里仅摘掉那句无条件硬失败。
+susfs_compat_unblock() {
+  local mk=""
+  local cand
+  for cand in "$KERNEL_ROOT/KernelSU/kernel/tools/susfs_compat.mk" \
+              "$KERNEL_ROOT/common/drivers/kernelsu/kernel/tools/susfs_compat.mk"; do
+    if [ -f "$cand" ]; then mk="$cand"; break; fi
+  done
+  if [ -z "$mk" ]; then
+    echo "SUSFS compat：未找到 susfs_compat.mk（该分支可能不含此检查），跳过"
+    return 0
+  fi
+  if grep -q '^\$(error' "$mk"; then
+    echo "SUSFS compat：移除上游硬编码的 \$(error Please wait susfs update.)（按上游修复思路自行放行）"
+    sed -i '/^\$(error/d' "$mk"
+    if grep -q '^\$(error' "$mk"; then
+      echo "::error::移除 $mk 里的硬失败失败" >&2
+      exit 1
+    fi
+    grep -n 'KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE\|KSU_COMPAT_HAS_SUSFS_INSTALL_SU_FD_DIRECT_CALL' "$mk" | head -4
+  else
+    echo "SUSFS compat：susfs_compat.mk 已无硬失败，跳过"
+  fi
+}
+susfs_compat_unblock
+
+# ---- builtin 的 track_throne 实参错配（新调用方 + 旧 bool 形参）----
+# builtin 的 manager/pkg_observer.c（PR #3871 引入，c8959206）两处以
+#   track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)
+# 调用，但 TRACK_THRONE_FORCE_SYNCHRONOUS 是 BakaSU 那套
+#   void track_throne(unsigned int flags)   （throne_tracker.h 里 #define (1 << 2)）
+# 位标志 API 的宏，builtin 从未定义过它；builtin 的 throne_tracker.c/.h 仍是旧 API
+#   void track_throne(bool prune_only)
+# 且函数一开头就是 `if (prune_only) goto prune;`（只剪 allowlist，不做管理器加冕扫描）。
+# 注意：直接用内核的 PROBE_FORCE_SYNCHRONOUS 当替身虽然能编过，但它是
+# include/linux/device.h 的驱动 probe 枚举（PROBE_DEFAULT_STRATEGY=0、
+# PROBE_PREFER_ASYNCHRONOUS=1、PROBE_FORCE_SYNCHRONOUS=2，非 0）——等于永远传
+# prune_only=true，管理器永远不会被加冕，is_manager() 恒 false，管理器拿不到 root
+# （表现为「管理器没权限」、修补 boot/LKM 也失败）。main 分支同一调用点写的就是
+# track_throne(false)（false = 全量扫描），builtin 的 fsnotify 路径同样需要全量扫描，
+# 依此替换；上游若把 flags 版 API 带进 builtin（树内 #define 了该宏）则自动跳过。
+ksu_track_throne_compat() {
+  local roots=("$KERNEL_ROOT/KernelSU" "$KERNEL_ROOT/common/drivers/kernelsu")
+  local pat='track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)'
+  local files n
+  files=$(grep -RFl "$pat" "${roots[@]}" 2>/dev/null || true)
+  if [ -z "$files" ]; then
+    echo "KSU track_throne 兼容：树内无 \"$pat\" 调用，跳过"
+    return 0
+  fi
+
+  if grep -RqsE '^[[:space:]]*#[[:space:]]*define[[:space:]]+TRACK_THRONE_FORCE_SYNCHRONOUS' \
+       "${roots[@]}" 2>/dev/null; then
+    echo "KSU track_throne 兼容：树内已定义 TRACK_THRONE_FORCE_SYNCHRONOUS（flags 版 API 已就位），保持原样"
+    return 0
+  fi
+
+  echo "KSU track_throne 兼容：把 \"$pat\" 换成 track_throne(false)（旧 API 下 false=全量扫描）"
+  local f
+  for f in $files; do
+    sed -i 's/track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS)/track_throne(false)/g' "$f"
+  done
+
+  # 写后校验：调用残留必须清零，且替换结果确实存在
+  n=$(grep -RFl "$pat" "${roots[@]}" 2>/dev/null | wc -l || true)
+  if [ "$n" -ne 0 ]; then
+    echo "::error::替换 TRACK_THRONE_FORCE_SYNCHRONOUS 失败（仍有 $n 个文件含该调用）" >&2
     exit 1
   fi
-done
+  if ! grep -Rqs 'track_throne(false)' "${roots[@]}" 2>/dev/null; then
+    echo "::error::替换后未找到 track_throne(false)，请人工核对 manager/pkg_observer.c" >&2
+    exit 1
+  fi
+  echo "KSU track_throne 兼容：已替换为 track_throne(false)（恢复管理器加冕扫描）"
+}
+ksu_track_throne_compat
+
+# ---- SukiSU builtin 的 dynamic manager ioctl 标识符合并残留 ----
+# 上游 builtin 把 main 的 dynamic manager 移植过来时，uapi/supercall.h 里 106 号
+# ioctl 那一行漏改（main 用的是 KSU_IOCTL_MANAGER）：
+#   DECLARE(__u32, KSU_IOCTL_KPM, _IOWR('K', 106, ksu_manager_cmd));
+# 这一行有两个缺陷：
+#   1) 标识符仍叫 KSU_IOCTL_KPM，与同一文件里 200 号的真正 KPM ioctl 重名 ——
+#      enum 里出现重复 enumerator，编译必报错；
+#   2) 类型漏了 struct 关键字（树里没有 ksu_manager_cmd 的 typedef）——
+#      clang 报 error: use of undeclared identifier 'ksu_manager_cmd'。
+# 而 kernel/supercall/dispatch.c 的 do_manager 注册用的是 KSU_IOCTL_MANAGER，
+# 于是这个被使用的名字在头文件里从未被声明。注意 manager.h / dynamic_manager.c
+# 在 builtin 与 main 里逐字节相同（且已由 ksu.c 引入），不需要从 main 搬文件，
+# 只要让 KSU_IOCTL_MANAGER 恰好被声明一次。上游对此先后出现过三种状态，都要认：
+#   形态 A（a233901 起、c95d6e2 止）：那行还在，但标识符写成 KSU_IOCTL_KPM 且缺
+#     struct —— 就地改名并补 struct；
+#   形态 B（0af2cf9 起）：上游只把那行删掉（消掉了重名错误），dispatch.c 仍在引用
+#     KSU_IOCTL_MANAGER —— 按 main 在 KSU_IOCTL_KPM(200) 之前补回规范声明；
+#   形态 C（5ef32ad 起）：整批 per-feature ioctl 合并成单个 KSU_IOCTL_EXTENSION，
+#     旧名只剩注释 —— 无需处理（判据只取头文件，全树 grep 会命中注释而误判）。
+# 上游修正后本步骤按内容检测自动跳过。
+ksu_manager_ioctl_compat() {
+  local candidates=(
+    "$KERNEL_ROOT/KernelSU/kernel/include/uapi/supercall.h"
+    "$KERNEL_ROOT/common/drivers/kernelsu/include/uapi/supercall.h"
+    "$KERNEL_ROOT/KernelSU/uapi/supercall.h"
+    "$KERNEL_ROOT/common/drivers/kernelsu/uapi/supercall.h"
+  )
+  local uapi="" cand
+  for cand in "${candidates[@]}"; do
+    if [ -f "$cand" ]; then uapi="$cand"; break; fi
+  done
+  if [ -z "$uapi" ]; then
+    echo "KSU manager ioctl 兼容：未找到 uapi/supercall.h（该分支布局可能已变化），跳过"
+    return 0
+  fi
+
+  # DECLARE(__u32, NAME, ...) 与 static const __u32 NAME = ... 两种声明形态都认
+  if grep -qE '\bKSU_IOCTL_MANAGER\b[[:space:]]*[=,]' "$uapi"; then
+    echo "KSU manager ioctl 兼容：$uapi 已声明 KSU_IOCTL_MANAGER，跳过"
+    return 0
+  fi
+
+  # 上游 5ef32ad（2026-10-19）起把这批 per-feature ioctl（KPM / MANAGER /
+  # ADD_TRY_UMOUNT / LIST_TRY_UMOUNT / SET_SPOOF_CPU / ENABLE_KPM …）合并成单个
+  # KSU_IOCTL_EXTENSION（kernel/include/uapi/extension.h，nr 300），旧名只留在
+  # 注释里说明历史 —— 既没有 200 号 KPM 行可依，也没有真实引用，直接跳过。
+  # 判据只看头文件：不能拿"全树 grep 到 KSU_IOCTL_MANAGER"当引用判据，那会命中注释。
+  if ! grep -qE '\bKSU_IOCTL_KPM\b' "$uapi"; then
+    echo "KSU manager ioctl 兼容：$uapi 已无 KSU_IOCTL_KPM（上游改用 KSU_IOCTL_EXTENSION），跳过"
+    return 0
+  fi
+
+  local SHAPE=""
+  echo "KSU manager ioctl 兼容：$uapi 缺 KSU_IOCTL_MANAGER 声明，补正"
+
+  if grep -qE '\bKSU_IOCTL_[A-Z0-9_]+\b.*\bksu_manager_cmd\b' "$uapi"; then
+    SHAPE=A
+    # 形态 A：只动“同一行里既有 KSU_IOCTL_* 标识符、又出现 ksu_manager_cmd”的那一行，
+    # 即 106 号 ioctl 的声明行；不锚定行尾，兼容 CRLF 检出。
+    perl -i -pe '
+      next unless /\bKSU_IOCTL_[A-Z0-9_]+\b/ && /\bksu_manager_cmd\b/;
+      s/(?<!struct )\bksu_manager_cmd\b/struct ksu_manager_cmd/g;
+      s/\bKSU_IOCTL_[A-Z0-9_]+\b/KSU_IOCTL_MANAGER/;
+    ' "$uapi"
+  else
+    SHAPE=B
+    # 形态 B：那行已被上游删掉，在 KSU_IOCTL_KPM 的 200 号声明之前插入规范声明，
+    # 顺序与 main 的 uapi/supercall.h 一致（MANAGER 在 KPM 之前）。行尾跟随原文件。
+    perl -0777 -i -pe '
+      my $q = chr(39);
+      my $nl = /\r\n/ ? "\r\n" : "\n";
+      my $decl = "DECLARE(__u32, KSU_IOCTL_MANAGER, _IOWR(${q}K${q}, 106, struct ksu_manager_cmd));";
+      s{^(.*DECLARE\(__u32, KSU_IOCTL_KPM,.*\b200\b.*)$}{$decl . $nl . $1}me;
+    ' "$uapi"
+  fi
+
+  # 写后校验：MANAGER/KPM 各自恰好一个定义，且 106 号行带上 struct 关键字
+  local mgr_count kpm_count
+  mgr_count=$(grep -cE '\bKSU_IOCTL_MANAGER\b[[:space:]]*[=,]' "$uapi" || true)
+  kpm_count=$(grep -cE '\bKSU_IOCTL_KPM\b[[:space:]]*[=,]' "$uapi" || true)
+  if [ "$mgr_count" != "1" ] || [ "$kpm_count" != "1" ] \
+    || ! grep -qE "106[^)]*struct[[:space:]]+ksu_manager_cmd" "$uapi"; then
+    echo "::error title=KSU manager ioctl 兼容失败::未能补正 $uapi 的 106 号 ioctl 声明（形态 $SHAPE；KSU_IOCTL_MANAGER 定义数=$mgr_count，KSU_IOCTL_KPM 定义数=$kpm_count）。上游布局可能已变化，请对比 main 分支的 uapi/supercall.h 人工核对" >&2
+    exit 1
+  fi
+  echo "KSU manager ioctl 兼容：已把 106 号 ioctl 补正为 KSU_IOCTL_MANAGER = _IOWR('K', 106, struct ksu_manager_cmd)"
+}
+ksu_manager_ioctl_compat
+
+# ---- SukiSU builtin 的 throne_tracker 合并残留（与上一处同一批移植）----
+# 上游 builtin 移植 dynamic multi-manager（a233901 / PR #987）时还漏改了一处：
+# crown_manager() 里 pkg 是 if (sig_fallback) 块内的局部变量，函数末尾那个
+# 「跳过内置管理器、只给动态管理器加冕」的循环却在块外引用它：
+#   common/drivers/kernelsu/manager/throne_tracker.c:97: error:
+#     use of undeclared identifier 'pkg'
+# main 分支该行用的是 KSU_PACKAGE_NAME（语义＝跳过内置管理器自己那条记录，
+# 见 main 对应循环里的 continue），按 main 换回去即可；块内那处合法用法不动。
+# 该文件里这串调用只会出现两次（一次块内、一次块外），据此判定并按内容跳过。
+ksu_throne_tracker_pkg_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/throne_tracker.c" \
+              "$KERNEL_ROOT/KernelSU/kernel/manager/throne_tracker.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ]; then
+    echo "KSU throne_tracker 兼容：未找到 manager/throne_tracker.c（该分支布局可能已变化），跳过"
+    return 0
+  fi
+
+  local pat='strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)'
+  local n
+  n=$(grep -oF "$pat" "$f" | wc -l || true)
+  if [ "$n" -eq 1 ]; then
+    echo "KSU throne_tracker 兼容：pkg 只在 sig_fallback 块内使用，无需处理"
+    return 0
+  fi
+  if [ "$n" -eq 0 ]; then
+    echo "KSU throne_tracker 兼容：未找到 \"$pat\"（上游可能已重构该函数），跳过"
+    return 0
+  fi
+  if [ "$n" -ne 2 ]; then
+    echo "::error title=KSU throne_tracker 兼容失败::$f 中 \"$pat\" 出现 $n 次（期望 0/1/2 次），无法判定哪一处是块外残留，请对照 main 分支人工核对" >&2
+    exit 1
+  fi
+
+  echo "KSU throne_tracker 兼容：块外残留引用了局部变量 pkg，按 main 换回 KSU_PACKAGE_NAME"
+  # 第一处在 if (sig_fallback) 块内（合法），只改最后一处
+  perl -0777 -i -pe '
+    my $pat = q{strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME)};
+    my $n = () = /\Q$pat\E/g;
+    my $i = 0;
+    s{\Q$pat\E}{ ++$i == $n ? "strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)" : $& }ge;
+  ' "$f"
+
+  # 写后校验：块内那处保留、块外那处已换掉
+  n=$(grep -oF "$pat" "$f" | wc -l || true)
+  if [ "$n" -ne 1 ] \
+    || ! grep -qF 'strncmp(np->package, KSU_PACKAGE_NAME, KSU_MAX_PACKAGE_NAME)' "$f"; then
+    echo "::error::throne_tracker.c 补正失败（剩余 \"$pat\" $n 处），请对照 main 分支人工核对" >&2
+    exit 1
+  fi
+  echo "KSU throne_tracker 兼容：已把块外的 pkg 换回 KSU_PACKAGE_NAME"
+}
+ksu_throne_tracker_pkg_compat
+
+# ---- 上游 throne_tracker.c 结构体初始化漏分号（2026-10-21 的新代码）----
+# search_manager() 里
+#   struct my_dir_context ctx = { .ctx.actor = my_actor,
+#                                 ...
+#                                 .depth = pos->depth }      ← 少了 ;
+# clang 报 `error: expected ';' at end of declaration`。同一批新代码里另外两个
+# 错误（throne_tracker.c 的 __attribute__((weak)) extern、以及把函数地址当布尔
+# 判断的 -Wpointer-bool-conversion）上游几个小时内已自行改成 static_call 方案，
+# 本步骤不处理；上游把这个分号补上后，这里按内容检测自动跳过。
+ksu_throne_tracker_semicolon_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/manager/throne_tracker.c" \
+              "$KERNEL_ROOT/KernelSU/kernel/manager/throne_tracker.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ] || ! grep -qE '\.depth = pos->depth[[:space:]]*\}' "$f"; then
+    echo "KSU throne_tracker 分号兼容：无需处理（无该结构体初始化行），跳过"
+    return 0
+  fi
+  if grep -qE '\.depth = pos->depth[[:space:]]*\};' "$f"; then
+    echo "KSU throne_tracker 分号兼容：分号已在（上游已修），跳过"
+    return 0
+  fi
+  echo "KSU throne_tracker 分号兼容：为 my_dir_context 初始化补上缺失的分号"
+  perl -i -pe 's{^(\s*\.depth = pos->depth\s*\})(\s*)$}{$1;$2}' "$f"
+  if ! grep -qE '\.depth = pos->depth[[:space:]]*\};' "$f"; then
+    echo "::error::补分号失败（$f），请人工核对 manager/throne_tracker.c" >&2
+    exit 1
+  fi
+  echo "KSU throne_tracker 分号兼容：已补上"
+}
+ksu_throne_tracker_semicolon_compat
+
+# ---- 上游 shell_su_adb_only.c 条件编译未闭合（2026-10-21 的新代码）----
+# 上游 6d571adc 给这个文件加 KSU_COMPAT_USE_STATIC_KEY 守卫时，动手改坏了
+# ksu_shell_su_allowed_for_current()：本该收尾的 #endif 被写成了 #else，
+# 中间还夹着一句加守卫之前的残句（缩进都是 3 格，手工合并的痕迹）：
+#
+#   #ifdef KSU_COMPAT_USE_STATIC_KEY
+#       if (!static_branch_unlikely(&ksu_shell_su_adb_only)) {
+#           return true;
+#       }
+#      if (unlikely(ksu_shell_su_adb_only)) {   ← 残句：static_key 结构体当布尔用
+#           return true;
+#       }
+#   #else                                        ← 这里本该是 #endif
+#                                                ← 于是 #else 分支挨到文件尾，空的
+#       return has_trusted_ancestor();
+#   }                                            ← 函数右花括号被 #else 一起跳过
+#
+# 两个后果，第二个才是致命的：
+#   1) 残句那行 clang 报 invalid argument type 'struct static_key_false' to
+#      unary expression；
+#   2) 从 #else 到文件尾全被预处理掉 ⇒ 函数没了右花括号、条件编译悬到 EOF
+#      （unterminated conditional directive）。而 mount_hide.c、runtime/ksud.c
+#      是同一个编译单元里随后 #include 进来的，于是它们的正文全部被解析进这个
+#      没闭合的函数体内，报出十几条 "function definition is not allowed here"、
+#      "function declared in block scope cannot have 'static' storage class"。
+#      ——那一片报错都是级联，真因只有这一处。
+#
+# KSU_COMPAT_USE_STATIC_KEY 由 kernel_compat.h 里 LINUX_VERSION_CODE >= 4.3
+# 定义，本项目所有目标内核都满足 ⇒ 走的一定是 #ifdef 那一支；#else 那支只服务
+# 4.3 以前的内核，这里仍按官方 main 的语义（!static_branch_unlikely ↔ !flag）
+# 补全，免得日后有人往老内核回移时踩到反了的判据。
+#
+# 判据看内容不砍版本：文件里出现那句残句才动手（正确写法是 unlikely(!...，
+# 不会误命中）；上游自己修好后自动跳过；条件编译不平衡却又没有残句，说明是
+# 别的形态的破坏，直接报错不猜。重复执行幂等（重写完就是上面那份规范文本）。
+cond_balance() {
+  # 打印「#if* 比 #endif 多几个」；先剥注释，避免注释里的示例被当成真指令
+  perl -0777 -pe 's{/\*.*?\*/}{}gs; s{//[^\n]*}{}g' "$1" | awk '
+    { s=$0; sub(/^[ \t]+/,"",s)
+      if (s ~ /^#[ \t]*endif/) d--
+      else if (s ~ /^#[ \t]*if/) d++ }
+    END { print d+0 }'
+}
+
+ksu_shell_su_adb_only_compat() {
+  local f="" cand
+  for cand in "$KERNEL_ROOT/common/drivers/kernelsu/feature/shell_su_adb_only.c" \
+              "$KERNEL_ROOT/KernelSU/kernel/feature/shell_su_adb_only.c"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  if [ -z "$f" ]; then
+    echo "KSU shell_su_adb_only 兼容：未找到 feature/shell_su_adb_only.c（该分支无此文件），跳过"
+    return 0
+  fi
+
+  local broken='unlikely(ksu_shell_su_adb_only)'
+  local sig='bool ksu_shell_su_allowed_for_current(void)'
+  if ! grep -qF "$broken" "$f"; then
+    local bal; bal=$(cond_balance "$f")
+    if [ "$bal" -ne 0 ]; then
+      echo "::error title=KSU shell_su_adb_only 兼容失败::$f 条件编译不平衡（#if 比 #endif 多 $bal）但未见已知残句，上游改动形态不认识，请人工核对" >&2
+      exit 1
+    fi
+    echo "KSU shell_su_adb_only 兼容：无需处理（无残句且条件编译平衡），跳过"
+    return 0
+  fi
+
+  echo "KSU shell_su_adb_only 兼容：ksu_shell_su_allowed_for_current() 的 #endif 被写成 #else，整段重写为规范形态"
+  # 从函数签名重写到该函数第一个顶格 } 为止（残句把右花括号吞了，所以“第一个顶格 }”
+  # 就是本函数真正的收尾）；不依赖残句那几行的缩进/换行，CRLF 检出也照改。
+  perl -0777 -i -pe '
+    my $nl = /\r\n/ ? "\r\n" : "\n";
+    my $sig = "bool ksu_shell_su_allowed_for_current(void)";
+    my $canon = join($nl,
+      $sig,
+      "{",
+      "#ifdef KSU_COMPAT_USE_STATIC_KEY",
+      "    if (!static_branch_unlikely(&ksu_shell_su_adb_only)) {",
+      "        return true;",
+      "    }",
+      "#else",
+      "    if (unlikely(!ksu_shell_su_adb_only)) {",
+      "        return true;",
+      "    }",
+      "#endif",
+      "",
+      "    return has_trusted_ancestor();",
+      "}"
+    );
+    my $re = qr{\Q$sig\E\r?\n\{\r?\n[\s\S]*?\r?\n\}};
+    my $n = s/$re/$canon/;
+    if ($n != 1) {
+      print STDERR "::error::shell_su_adb_only.c 里 $sig 匹配 $n 次（期望 1 次），请人工核对\n";
+      exit 1;
+    }
+  ' "$f" || exit 1
+
+  # 写后校验：残句没了、规范形态在、条件编译平衡
+  local bal; bal=$(cond_balance "$f")
+  if grep -qF "$broken" "$f" || [ "$bal" -ne 0 ] \
+    || ! grep -qF '#endif' "$f" \
+    || ! grep -qF 'unlikely(!ksu_shell_su_adb_only)' "$f"; then
+    echo "::error::shell_su_adb_only.c 补正失败（残句残留或条件编译仍不平衡，差值 $bal），请人工核对 $f" >&2
+    exit 1
+  fi
+  echo "KSU shell_su_adb_only 兼容：已闭合条件编译，函数收尾补回（条件编译差值 $bal）"
+}
+ksu_shell_su_adb_only_compat
+
+# ---- 兜底诊断：KernelSU 树的条件编译平衡 ----
+# 上面那个坑的报错形态极难认：真因（少一个 #endif）在 A 文件，clang 的报错却
+# 全落在同一个编译单元里随后 #include 进来的 B、C 文件上（"function definition
+# is not allowed here"、"function declared in block scope" 之类），看着像 B、C
+# 坏了。这一步只诊断、只报 warning，绝不阻断构建：同类破坏再现时，日志里会直接
+# 点名是哪个文件，省掉一轮 CI。
+# 先剥注释再数，免得注释里的示例指令被当成真指令；#endif 必须先判，
+# 因为它也以 "#if" 开头。
+ksu_cond_balance_scan() {
+  local kroot="" cand
+  for cand in "$KERNEL_ROOT/KernelSU/kernel" "$KERNEL_ROOT/common/drivers/kernelsu"; do
+    if [ -d "$cand" ]; then kroot="$cand"; break; fi
+  done
+  if [ -z "$kroot" ]; then
+    echo "KSU 条件编译平衡扫描：未找到 KernelSU 源码目录，跳过"
+    return 0
+  fi
+
+  # 注意：perl 程序里不能出现字面量 "{}"（含 s{...}{} 这种替换定界符），
+  # 否则 find -exec ... + 会报 "Only one instance of {} is supported" 而
+  # 一个文件都不扫。替换用 "!" 做定界符。
+  local hits=""
+  hits=$(find "$kroot" -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' \) -exec perl -e '
+    for my $f (@ARGV) {
+      open(my $fh, "<", $f) or next;
+      local $/; my $t = <$fh>; close $fh;
+      $t =~ s!/\*.*?\*/!!gs;
+      $t =~ s!//[^\n]*!!g;
+      my $d = 0;
+      for my $l (split /\n/, $t) {
+        (my $s = $l) =~ s/^\s+//;
+        if    ($s =~ /^#\s*endif/) { $d-- }
+        elsif ($s =~ /^#\s*if/)    { $d++ }
+      }
+      printf "%s  (%s %d 个 #endif)\n", $f, ($d > 0 ? "少" : "多"), abs($d) if $d != 0;
+    }' {} +) || hits=""
+
+  if [ -n "$hits" ]; then
+    echo "::warning title=KSU 条件编译不平衡（报错会落在别的文件上，真因在这里）::$hits"
+  else
+    echo "KSU 条件编译平衡扫描：$(find "$kroot" -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' \) | wc -l) 个文件全部平衡"
+  fi
+}
+ksu_cond_balance_scan
