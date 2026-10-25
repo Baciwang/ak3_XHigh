@@ -96,7 +96,7 @@ A commit is a hash string representing the state of a repository at a certain po
 ## 🙏 Acknowledgments
 
 - [osm0sis/AnyKernel3](https://github.com/osm0sis/AnyKernel3)
-- [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) / [WildKernels/GKI_KernelSU_SUSFS](https://github.com/WildKernels/GKI_KernelSU_SUSFS) / [Lingluo17/Anykernel3](https:/github.com/Lingluo17/Anykernel3)
+- [zzh20188/GKI_KernelSU_SUSFS](https://github.com/zzh20188/GKI_KernelSU_SUSFS) / [WildKernels/GKI_KernelSU_SUSFS](https://github.com/WildKernels/GKI_KernelSU_SUSFS) / [LingLuo17/Anykernel3](https:/github.com/LingLuo17/Anykernel3)
 - [SukiSU](https://sukisu.org/) / [BakaSU](https://bakasu.org/) / [FinaSU](https://github.com/LyraVoid/FinaSU)
 - [SUSFS](https://gitlab.com/simonpunk/susfs4ksu)
 
