@@ -710,6 +710,28 @@ jobs:
             echo "KSU_LATEST_COMMIT_DATE=未知" >> $GITHUB_ENV
           fi
 
+      - name: 计算 AnyKernel3 命名版本
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          KSU_VERSION=""
+          if [ -n "${{ inputs.ksu_commit }}" ] && [ -d KernelSU/.git ]; then
+            KSU_COUNT=$(git -C KernelSU rev-list --count "${{ inputs.ksu_commit }}" 2>/dev/null || echo "")
+            if [ -n "$KSU_COUNT" ]; then
+              case "${{ inputs.ksu_variant }}" in
+                SukiSU) KSU_VERSION=$((40000 + KSU_COUNT - 2815)) ;;
+                BakaSU) KSU_VERSION=$((30700 + KSU_COUNT)) ;;
+                FinaSU) KSU_VERSION=$((30000 + KSU_COUNT)) ;;
+              esac
+            fi
+          fi
+          if [ -n "$KSU_VERSION" ]; then
+            AK3_NAME="${{ inputs.ksu_variant }}-${KSU_VERSION}-${CONFIG}"
+          else
+            AK3_NAME="${{ inputs.ksu_variant }}_kernel-${CONFIG}"
+          fi
+          echo "AK3_NAME=$AK3_NAME" >> $GITHUB_ENV
+          echo "AnyKernel3 命名: $AK3_NAME"
+
       # FinaSU 的内核侧 SUSFS 集成已并入 scripts/susfs_fixes/apply.sh：
       # 上游自 5b83330b（2026-10-23）起树内原生集成 SUSFS，与 SukiSU/BakaSU
       # 同为「驱动侧不打补丁」形态，由「应用 SUSFS 补丁」步骤统一校验并应用
@@ -1761,7 +1783,7 @@ jobs:
         if: inputs.artifact_upload_mode == '上传全部'
         run: |
           cd "$ANYKERNEL3"
-          ZIP_NAME="${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+          ZIP_NAME="${AK3_NAME}-AnyKernel3.zip"
           mv ../Image ./Image
           zip -r "../$ZIP_NAME" ./*
 
@@ -1851,7 +1873,7 @@ jobs:
         if: inputs.artifact_upload_mode != '上传全部'
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ inputs.ksu_variant }}_kernel-${{ env.CONFIG }}-AnyKernel3
+          name: ${{ env.AK3_NAME }}-AnyKernel3
           path: "AnyKernel3-package/*"
           if-no-files-found: error
           compression-level: 9
@@ -1860,7 +1882,7 @@ jobs:
         if: inputs.artifact_upload_mode == '上传全部'
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ inputs.ksu_variant }}_kernel-${{ env.CONFIG }}
+          name: ${{ env.AK3_NAME }}-AnyKernel3
           path: |
             *AnyKernel3.zip
             *.img
